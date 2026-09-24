@@ -1,1 +1,0 @@
-/usr/bin/c++  -Wall -Wextra -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/kv_server.dir/src/server_main.cpp.o -o kv_server  libnet.a libstorage.a

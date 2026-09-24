@@ -1,1 +1,0 @@
-/usr/bin/c++  -Wall -Wextra -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_tcp_server.dir/test/integration/tcp_server_test.cpp.o -o test_tcp_server  libnet.a libstorage.a

@@ -1,1 +1,0 @@
-/usr/bin/c++  -Wall -Wextra -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/test_wal.dir/test/unit/storage/test_wal.cpp.o -o test_wal  libstorage.a
