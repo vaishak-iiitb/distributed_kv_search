@@ -1,0 +1,2 @@
+/usr/bin/ar qc libnet.a CMakeFiles/net.dir/src/net/thread_pool.cpp.o CMakeFiles/net.dir/src/net/tcp_server.cpp.o
+/usr/bin/ranlib libnet.a

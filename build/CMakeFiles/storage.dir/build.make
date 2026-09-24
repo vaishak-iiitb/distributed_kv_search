@@ -156,6 +156,20 @@ CMakeFiles/storage.dir/src/storage/compaction.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/storage.dir/src/storage/compaction.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/vaishak/Desktop/projects/distributed_kv_search/src/storage/compaction.cpp -o CMakeFiles/storage.dir/src/storage/compaction.cpp.s
 
+CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o: CMakeFiles/storage.dir/flags.make
+CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o: /Users/vaishak/Desktop/projects/distributed_kv_search/src/storage/kv_engine.cpp
+CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o: CMakeFiles/storage.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/vaishak/Desktop/projects/distributed_kv_search/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o -MF CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o.d -o CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o -c /Users/vaishak/Desktop/projects/distributed_kv_search/src/storage/kv_engine.cpp
+
+CMakeFiles/storage.dir/src/storage/kv_engine.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/storage.dir/src/storage/kv_engine.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /Users/vaishak/Desktop/projects/distributed_kv_search/src/storage/kv_engine.cpp > CMakeFiles/storage.dir/src/storage/kv_engine.cpp.i
+
+CMakeFiles/storage.dir/src/storage/kv_engine.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/storage.dir/src/storage/kv_engine.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /Users/vaishak/Desktop/projects/distributed_kv_search/src/storage/kv_engine.cpp -o CMakeFiles/storage.dir/src/storage/kv_engine.cpp.s
+
 # Object files for target storage
 storage_OBJECTS = \
 "CMakeFiles/storage.dir/src/storage/skiplist.cpp.o" \
@@ -163,7 +177,8 @@ storage_OBJECTS = \
 "CMakeFiles/storage.dir/src/storage/memtable.cpp.o" \
 "CMakeFiles/storage.dir/src/storage/bloom_filter.cpp.o" \
 "CMakeFiles/storage.dir/src/storage/sstable.cpp.o" \
-"CMakeFiles/storage.dir/src/storage/compaction.cpp.o"
+"CMakeFiles/storage.dir/src/storage/compaction.cpp.o" \
+"CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o"
 
 # External object files for target storage
 storage_EXTERNAL_OBJECTS =
@@ -174,9 +189,10 @@ libstorage.a: CMakeFiles/storage.dir/src/storage/memtable.cpp.o
 libstorage.a: CMakeFiles/storage.dir/src/storage/bloom_filter.cpp.o
 libstorage.a: CMakeFiles/storage.dir/src/storage/sstable.cpp.o
 libstorage.a: CMakeFiles/storage.dir/src/storage/compaction.cpp.o
+libstorage.a: CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o
 libstorage.a: CMakeFiles/storage.dir/build.make
 libstorage.a: CMakeFiles/storage.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/vaishak/Desktop/projects/distributed_kv_search/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Linking CXX static library libstorage.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/vaishak/Desktop/projects/distributed_kv_search/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Linking CXX static library libstorage.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/storage.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/storage.dir/link.txt --verbose=$(VERBOSE)
 

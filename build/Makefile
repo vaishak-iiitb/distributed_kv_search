@@ -140,6 +140,19 @@ storage/fast:
 .PHONY : storage/fast
 
 #=============================================================================
+# Target rules for targets named net
+
+# Build rule for target.
+net: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 net
+.PHONY : net
+
+# fast build rule for target.
+net/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/build
+.PHONY : net/fast
+
+#=============================================================================
 # Target rules for targets named test_skiplist
 
 # Build rule for target.
@@ -217,6 +230,117 @@ test_compaction/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compaction.dir/build.make CMakeFiles/test_compaction.dir/build
 .PHONY : test_compaction/fast
 
+#=============================================================================
+# Target rules for targets named test_tcp_server
+
+# Build rule for target.
+test_tcp_server: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_tcp_server
+.PHONY : test_tcp_server
+
+# fast build rule for target.
+test_tcp_server/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_tcp_server.dir/build.make CMakeFiles/test_tcp_server.dir/build
+.PHONY : test_tcp_server/fast
+
+#=============================================================================
+# Target rules for targets named kv_server
+
+# Build rule for target.
+kv_server: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 kv_server
+.PHONY : kv_server
+
+# fast build rule for target.
+kv_server/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kv_server.dir/build.make CMakeFiles/kv_server.dir/build
+.PHONY : kv_server/fast
+
+#=============================================================================
+# Target rules for targets named cli
+
+# Build rule for target.
+cli: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cli
+.PHONY : cli
+
+# fast build rule for target.
+cli/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cli.dir/build.make CMakeFiles/cli.dir/build
+.PHONY : cli/fast
+
+src/net/tcp_server.o: src/net/tcp_server.cpp.o
+.PHONY : src/net/tcp_server.o
+
+# target to build an object file
+src/net/tcp_server.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/tcp_server.cpp.o
+.PHONY : src/net/tcp_server.cpp.o
+
+src/net/tcp_server.i: src/net/tcp_server.cpp.i
+.PHONY : src/net/tcp_server.i
+
+# target to preprocess a source file
+src/net/tcp_server.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/tcp_server.cpp.i
+.PHONY : src/net/tcp_server.cpp.i
+
+src/net/tcp_server.s: src/net/tcp_server.cpp.s
+.PHONY : src/net/tcp_server.s
+
+# target to generate assembly for a file
+src/net/tcp_server.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/tcp_server.cpp.s
+.PHONY : src/net/tcp_server.cpp.s
+
+src/net/thread_pool.o: src/net/thread_pool.cpp.o
+.PHONY : src/net/thread_pool.o
+
+# target to build an object file
+src/net/thread_pool.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/thread_pool.cpp.o
+.PHONY : src/net/thread_pool.cpp.o
+
+src/net/thread_pool.i: src/net/thread_pool.cpp.i
+.PHONY : src/net/thread_pool.i
+
+# target to preprocess a source file
+src/net/thread_pool.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/thread_pool.cpp.i
+.PHONY : src/net/thread_pool.cpp.i
+
+src/net/thread_pool.s: src/net/thread_pool.cpp.s
+.PHONY : src/net/thread_pool.s
+
+# target to generate assembly for a file
+src/net/thread_pool.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/net.dir/build.make CMakeFiles/net.dir/src/net/thread_pool.cpp.s
+.PHONY : src/net/thread_pool.cpp.s
+
+src/server_main.o: src/server_main.cpp.o
+.PHONY : src/server_main.o
+
+# target to build an object file
+src/server_main.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kv_server.dir/build.make CMakeFiles/kv_server.dir/src/server_main.cpp.o
+.PHONY : src/server_main.cpp.o
+
+src/server_main.i: src/server_main.cpp.i
+.PHONY : src/server_main.i
+
+# target to preprocess a source file
+src/server_main.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kv_server.dir/build.make CMakeFiles/kv_server.dir/src/server_main.cpp.i
+.PHONY : src/server_main.cpp.i
+
+src/server_main.s: src/server_main.cpp.s
+.PHONY : src/server_main.s
+
+# target to generate assembly for a file
+src/server_main.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kv_server.dir/build.make CMakeFiles/kv_server.dir/src/server_main.cpp.s
+.PHONY : src/server_main.cpp.s
+
 src/storage/bloom_filter.o: src/storage/bloom_filter.cpp.o
 .PHONY : src/storage/bloom_filter.o
 
@@ -264,6 +388,30 @@ src/storage/compaction.s: src/storage/compaction.cpp.s
 src/storage/compaction.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/storage.dir/build.make CMakeFiles/storage.dir/src/storage/compaction.cpp.s
 .PHONY : src/storage/compaction.cpp.s
+
+src/storage/kv_engine.o: src/storage/kv_engine.cpp.o
+.PHONY : src/storage/kv_engine.o
+
+# target to build an object file
+src/storage/kv_engine.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/storage.dir/build.make CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o
+.PHONY : src/storage/kv_engine.cpp.o
+
+src/storage/kv_engine.i: src/storage/kv_engine.cpp.i
+.PHONY : src/storage/kv_engine.i
+
+# target to preprocess a source file
+src/storage/kv_engine.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/storage.dir/build.make CMakeFiles/storage.dir/src/storage/kv_engine.cpp.i
+.PHONY : src/storage/kv_engine.cpp.i
+
+src/storage/kv_engine.s: src/storage/kv_engine.cpp.s
+.PHONY : src/storage/kv_engine.s
+
+# target to generate assembly for a file
+src/storage/kv_engine.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/storage.dir/build.make CMakeFiles/storage.dir/src/storage/kv_engine.cpp.s
+.PHONY : src/storage/kv_engine.cpp.s
 
 src/storage/memtable.o: src/storage/memtable.cpp.o
 .PHONY : src/storage/memtable.o
@@ -360,6 +508,30 @@ src/storage/wal.s: src/storage/wal.cpp.s
 src/storage/wal.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/storage.dir/build.make CMakeFiles/storage.dir/src/storage/wal.cpp.s
 .PHONY : src/storage/wal.cpp.s
+
+test/integration/tcp_server_test.o: test/integration/tcp_server_test.cpp.o
+.PHONY : test/integration/tcp_server_test.o
+
+# target to build an object file
+test/integration/tcp_server_test.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_tcp_server.dir/build.make CMakeFiles/test_tcp_server.dir/test/integration/tcp_server_test.cpp.o
+.PHONY : test/integration/tcp_server_test.cpp.o
+
+test/integration/tcp_server_test.i: test/integration/tcp_server_test.cpp.i
+.PHONY : test/integration/tcp_server_test.i
+
+# target to preprocess a source file
+test/integration/tcp_server_test.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_tcp_server.dir/build.make CMakeFiles/test_tcp_server.dir/test/integration/tcp_server_test.cpp.i
+.PHONY : test/integration/tcp_server_test.cpp.i
+
+test/integration/tcp_server_test.s: test/integration/tcp_server_test.cpp.s
+.PHONY : test/integration/tcp_server_test.s
+
+# target to generate assembly for a file
+test/integration/tcp_server_test.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_tcp_server.dir/build.make CMakeFiles/test_tcp_server.dir/test/integration/tcp_server_test.cpp.s
+.PHONY : test/integration/tcp_server_test.cpp.s
 
 test/unit/storage/test_bloom_filter.o: test/unit/storage/test_bloom_filter.cpp.o
 .PHONY : test/unit/storage/test_bloom_filter.o
@@ -505,6 +677,30 @@ test/unit/storage/test_wal.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_wal.dir/build.make CMakeFiles/test_wal.dir/test/unit/storage/test_wal.cpp.s
 .PHONY : test/unit/storage/test_wal.cpp.s
 
+tools/cli.o: tools/cli.cpp.o
+.PHONY : tools/cli.o
+
+# target to build an object file
+tools/cli.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cli.dir/build.make CMakeFiles/cli.dir/tools/cli.cpp.o
+.PHONY : tools/cli.cpp.o
+
+tools/cli.i: tools/cli.cpp.i
+.PHONY : tools/cli.i
+
+# target to preprocess a source file
+tools/cli.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cli.dir/build.make CMakeFiles/cli.dir/tools/cli.cpp.i
+.PHONY : tools/cli.cpp.i
+
+tools/cli.s: tools/cli.cpp.s
+.PHONY : tools/cli.s
+
+# target to generate assembly for a file
+tools/cli.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cli.dir/build.make CMakeFiles/cli.dir/tools/cli.cpp.s
+.PHONY : tools/cli.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -514,19 +710,35 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... cli"
+	@echo "... kv_server"
+	@echo "... net"
 	@echo "... storage"
 	@echo "... test_bloom_filter"
 	@echo "... test_compaction"
 	@echo "... test_memtable"
 	@echo "... test_skiplist"
 	@echo "... test_sstable"
+	@echo "... test_tcp_server"
 	@echo "... test_wal"
+	@echo "... src/net/tcp_server.o"
+	@echo "... src/net/tcp_server.i"
+	@echo "... src/net/tcp_server.s"
+	@echo "... src/net/thread_pool.o"
+	@echo "... src/net/thread_pool.i"
+	@echo "... src/net/thread_pool.s"
+	@echo "... src/server_main.o"
+	@echo "... src/server_main.i"
+	@echo "... src/server_main.s"
 	@echo "... src/storage/bloom_filter.o"
 	@echo "... src/storage/bloom_filter.i"
 	@echo "... src/storage/bloom_filter.s"
 	@echo "... src/storage/compaction.o"
 	@echo "... src/storage/compaction.i"
 	@echo "... src/storage/compaction.s"
+	@echo "... src/storage/kv_engine.o"
+	@echo "... src/storage/kv_engine.i"
+	@echo "... src/storage/kv_engine.s"
 	@echo "... src/storage/memtable.o"
 	@echo "... src/storage/memtable.i"
 	@echo "... src/storage/memtable.s"
@@ -539,6 +751,9 @@ help:
 	@echo "... src/storage/wal.o"
 	@echo "... src/storage/wal.i"
 	@echo "... src/storage/wal.s"
+	@echo "... test/integration/tcp_server_test.o"
+	@echo "... test/integration/tcp_server_test.i"
+	@echo "... test/integration/tcp_server_test.s"
 	@echo "... test/unit/storage/test_bloom_filter.o"
 	@echo "... test/unit/storage/test_bloom_filter.i"
 	@echo "... test/unit/storage/test_bloom_filter.s"
@@ -557,6 +772,9 @@ help:
 	@echo "... test/unit/storage/test_wal.o"
 	@echo "... test/unit/storage/test_wal.i"
 	@echo "... test/unit/storage/test_wal.s"
+	@echo "... tools/cli.o"
+	@echo "... tools/cli.i"
+	@echo "... tools/cli.s"
 .PHONY : help
 
 

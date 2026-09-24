@@ -3,6 +3,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/storage.dir/src/storage/bloom_filter.cpp.o.d"
   "CMakeFiles/storage.dir/src/storage/compaction.cpp.o"
   "CMakeFiles/storage.dir/src/storage/compaction.cpp.o.d"
+  "CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o"
+  "CMakeFiles/storage.dir/src/storage/kv_engine.cpp.o.d"
   "CMakeFiles/storage.dir/src/storage/memtable.cpp.o"
   "CMakeFiles/storage.dir/src/storage/memtable.cpp.o.d"
   "CMakeFiles/storage.dir/src/storage/skiplist.cpp.o"
