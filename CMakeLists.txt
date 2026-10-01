@@ -9,23 +9,36 @@ find_package(Threads REQUIRED)
 enable_testing()
 
 add_library(storage
-    src/storage/skiplist.cpp
-    src/storage/wal.cpp
-    src/storage/memtable.cpp
-    src/storage/bloom_filter.cpp
-    src/storage/sstable.cpp
-    src/storage/compaction.cpp
-    src/storage/kv_engine.cpp
+src/storage/skiplist.cpp
+src/storage/wal.cpp
+src/storage/memtable.cpp
+src/storage/bloom_filter.cpp
+src/storage/sstable.cpp
+src/storage/compaction.cpp
+src/storage/kv_engine.cpp
 )
 target_include_directories(storage PUBLIC src)
 target_link_libraries(storage PUBLIC Threads::Threads)
 
 add_library(net
-    src/net/thread_pool.cpp
-    src/net/tcp_server.cpp
+src/net/thread_pool.cpp
+src/net/tcp_server.cpp
 )
 target_include_directories(net PUBLIC src)
 target_link_libraries(net PUBLIC storage Threads::Threads)
+
+add_library(raft
+src/raft/rpc.cpp
+src/raft/log.cpp
+src/raft/state_machine.cpp
+src/raft/fake_cluster.cpp
+src/raft/election_timer.cpp
+src/raft/persistence.cpp
+src/raft/persistent_node.cpp
+src/raft/command.cpp
+)
+target_include_directories(raft PUBLIC src)
+target_link_libraries(raft PUBLIC storage Threads::Threads)
 
 # --- storage unit tests ---
 add_executable(test_skiplist test/unit/storage/test_skiplist.cpp)
@@ -35,7 +48,6 @@ add_test(NAME test_skiplist COMMAND test_skiplist)
 add_executable(test_wal test/unit/storage/test_wal.cpp)
 target_link_libraries(test_wal PRIVATE storage)
 add_test(NAME test_wal COMMAND test_wal)
-
 add_executable(test_memtable test/unit/storage/test_memtable.cpp)
 target_link_libraries(test_memtable PRIVATE storage)
 add_test(NAME test_memtable COMMAND test_memtable)
@@ -51,6 +63,55 @@ add_test(NAME test_sstable COMMAND test_sstable)
 add_executable(test_compaction test/unit/storage/test_compaction.cpp)
 target_link_libraries(test_compaction PRIVATE storage)
 add_test(NAME test_compaction COMMAND test_compaction)
+
+# --- raft unit tests ---
+add_executable(rpc_test test/unit/raft/rpc_test.cpp)
+target_link_libraries(rpc_test PRIVATE raft)
+add_test(NAME rpc_test COMMAND rpc_test)
+
+add_executable(test_state_machine test/unit/raft/test_state_machine.cpp)
+target_link_libraries(test_state_machine PRIVATE raft)
+add_test(NAME test_state_machine COMMAND test_state_machine)
+
+add_executable(fake_cluster_test test/unit/raft/fake_cluster_test.cpp)
+target_link_libraries(fake_cluster_test PRIVATE raft)
+add_test(NAME fake_cluster_test COMMAND fake_cluster_test)
+
+add_executable(election_timer_test test/unit/raft/election_timer_test.cpp)
+target_link_libraries(election_timer_test PRIVATE raft)
+add_test(NAME election_timer_test COMMAND election_timer_test)
+
+add_executable(log_test test/unit/raft/log_test.cpp)
+target_link_libraries(log_test PRIVATE raft)
+add_test(NAME log_test COMMAND log_test)
+
+add_executable(replication_test test/unit/raft/replication_test.cpp)
+target_link_libraries(replication_test PRIVATE raft)
+add_test(NAME replication_test COMMAND replication_test)
+
+add_executable(persistence_test test/unit/raft/persistence_test.cpp)
+target_link_libraries(persistence_test PRIVATE raft)
+add_test(NAME persistence_test COMMAND persistence_test)
+
+add_executable(persistent_node_test test/unit/raft/persistent_node_test.cpp)
+target_link_libraries(persistent_node_test PRIVATE raft)
+add_test(NAME persistent_node_test COMMAND persistent_node_test)
+
+add_executable(backtrack_test test/unit/raft/backtrack_test.cpp)
+target_link_libraries(backtrack_test PRIVATE raft)
+add_test(NAME backtrack_test COMMAND backtrack_test)
+
+add_executable(commit_test test/unit/raft/commit_test.cpp)
+target_link_libraries(commit_test PRIVATE raft)
+add_test(NAME commit_test COMMAND commit_test)
+
+add_executable(command_test test/unit/raft/command_test.cpp)
+target_link_libraries(command_test PRIVATE raft)
+add_test(NAME command_test COMMAND command_test)
+
+add_executable(apply_test test/unit/raft/apply_test.cpp)
+target_link_libraries(apply_test PRIVATE raft)
+add_test(NAME apply_test COMMAND apply_test)
 
 # --- integration test (real sockets, real disk) ---
 add_executable(test_tcp_server test/integration/tcp_server_test.cpp)
