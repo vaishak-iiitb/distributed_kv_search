@@ -11,3 +11,16 @@ kv_data/
 
 # OS cruft
 .DS_Store
+
+# Raft test scratch artifacts
+test/unit/raft/*_test
+rpc_test_scratch.*
+persistence_test_*.bin
+persistence_test_*.bin.tmp
+pnode_test_*.state
+pnode_test_*.log
+pnode_test_*.kv/
+apply_test_*.state
+apply_test_*.log
+apply_test_*.kv/
+*_scratch.*

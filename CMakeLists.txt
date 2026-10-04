@@ -36,9 +36,11 @@ src/raft/election_timer.cpp
 src/raft/persistence.cpp
 src/raft/persistent_node.cpp
 src/raft/command.cpp
+src/raft/raft_transport.cpp
+src/raft/raft_node.cpp
 )
 target_include_directories(raft PUBLIC src)
-target_link_libraries(raft PUBLIC storage Threads::Threads)
+target_link_libraries(raft PUBLIC net storage Threads::Threads)
 
 # --- storage unit tests ---
 add_executable(test_skiplist test/unit/storage/test_skiplist.cpp)
@@ -113,10 +115,18 @@ add_executable(apply_test test/unit/raft/apply_test.cpp)
 target_link_libraries(apply_test PRIVATE raft)
 add_test(NAME apply_test COMMAND apply_test)
 
-# --- integration test (real sockets, real disk) ---
+add_executable(raft_transport_test test/unit/raft/raft_transport_test.cpp)
+target_link_libraries(raft_transport_test PRIVATE raft)
+add_test(NAME raft_transport_test COMMAND raft_transport_test)
+
+# --- integration tests (real sockets, real disk) ---
 add_executable(test_tcp_server test/integration/tcp_server_test.cpp)
 target_link_libraries(test_tcp_server PRIVATE net storage)
 add_test(NAME test_tcp_server COMMAND test_tcp_server)
+
+add_executable(raft_node_cluster_test test/integration/raft_node_cluster_test.cpp)
+target_link_libraries(raft_node_cluster_test PRIVATE raft)
+add_test(NAME raft_node_cluster_test COMMAND raft_node_cluster_test)
 
 # --- server binary + manual CLI client ---
 add_executable(kv_server src/server_main.cpp)
