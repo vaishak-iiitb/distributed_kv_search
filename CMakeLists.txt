@@ -38,6 +38,7 @@ src/raft/persistent_node.cpp
 src/raft/command.cpp
 src/raft/raft_transport.cpp
 src/raft/raft_node.cpp
+src/raft/client_server.cpp
 )
 target_include_directories(raft PUBLIC src)
 target_link_libraries(raft PUBLIC net storage Threads::Threads)
@@ -128,8 +129,24 @@ add_executable(raft_node_cluster_test test/integration/raft_node_cluster_test.cp
 target_link_libraries(raft_node_cluster_test PRIVATE raft)
 add_test(NAME raft_node_cluster_test COMMAND raft_node_cluster_test)
 
+add_executable(client_server_test test/integration/client_server_test.cpp)
+target_link_libraries(client_server_test PRIVATE raft)
+add_test(NAME client_server_test COMMAND client_server_test)
+
 # --- server binary + manual CLI client ---
 add_executable(kv_server src/server_main.cpp)
 target_link_libraries(kv_server PRIVATE net storage)
 
 add_executable(cli tools/cli.cpp)
+
+# ---- Phase 3: sharding ----
+add_library(sharding
+  src/sharding/hash_ring.cpp
+  src/sharding/shard_map.cpp)
+target_include_directories(sharding PUBLIC src)
+
+add_executable(test_hash_ring test/unit/sharding/test_hash_ring.cpp)
+target_link_libraries(test_hash_ring sharding)
+
+add_executable(test_shard_map test/unit/sharding/test_shard_map.cpp)
+target_link_libraries(test_shard_map sharding)

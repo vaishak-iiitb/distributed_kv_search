@@ -1,6 +1,8 @@
 #include "raft/persistent_node.h"
 
 #include <cstdio>
+#include <filesystem>
+
 
 namespace {
 
@@ -20,9 +22,16 @@ void remove_if_exists(const std::string& path) { std::remove(path.c_str()); }
 void clean_node_files(const std::string& prefix) {
     remove_if_exists(prefix + ".state");
     remove_if_exists(prefix + ".log");
-    // kv_data_dir is a directory KVEngine manages; leftover files from a
-    // prior run are tolerated (KVEngine recovers whatever's there), so
-    // no directory cleanup here beyond what each test needs explicitly.
+    // The kv_data_dir IS removed here, at the start of each test, so
+    // every test run is isolated from any prior run's leftover data —
+    // not removing this previously let stale KV state from an earlier
+    // session make a later run's "should still be absent" assertions
+    // fail for reasons unrelated to that run's own logic. This does NOT
+    // affect the WITHIN-test restart in
+    // test_applied_data_survives_restart_independently_of_raft_state,
+    // since that restart happens after this initial clean, not during it.
+    std::error_code ec;
+    std::filesystem::remove_all(prefix + ".kv", ec);  // ignore errors (e.g. doesn't exist yet)
 }
 
 // Elects `leader` (id 0) with `follower` (id 1) as its only real peer, in
@@ -98,7 +107,7 @@ void test_committed_put_is_applied_and_readable_on_leader() {
                                       prefix + "_n1.kv");
     elect_two_node_leader(leader, follower);
 
-    const auto propose_result = leader.ProposePut("x", "1");
+    const auto propose_result = leader.ProposePut(/*client_id=*/1, /*sequence_num=*/1, "x", "1");
     CHECK(propose_result.persisted && propose_result.result.accepted);
 
     const auto handle_result =
@@ -118,7 +127,7 @@ void test_committed_put_is_applied_and_readable_on_leader() {
     CHECK(!follower.Get("x", &value));
 
     // A second write carries leader_commit=1 to the follower this time.
-    const auto propose2 = leader.ProposePut("y", "2");
+    const auto propose2 = leader.ProposePut(/*client_id=*/1, /*sequence_num=*/2, "y", "2");
     relay_append_entries(propose2.result.to_send, leader, follower);
 
     CHECK(follower.Get("x", &value));  // NOW visible
@@ -136,14 +145,14 @@ void test_delete_removes_value_once_applied() {
                                       prefix + "_n1.kv");
     elect_two_node_leader(leader, follower);
 
-    const auto put_result = leader.ProposePut("k", "v");
+    const auto put_result = leader.ProposePut(/*client_id=*/1, /*sequence_num=*/1, "k", "v");
     relay_append_entries(put_result.result.to_send, leader, follower);
 
     std::string value;
     CHECK(leader.Get("k", &value));
     CHECK(value == "v");
 
-    const auto delete_result = leader.ProposeDelete("k");
+    const auto delete_result = leader.ProposeDelete(/*client_id=*/1, /*sequence_num=*/2, "k");
     relay_append_entries(delete_result.result.to_send, leader, follower);
 
     CHECK(!leader.Get("k", &value));  // gone, once applied
@@ -151,7 +160,7 @@ void test_delete_removes_value_once_applied() {
 
 // KVEngine's own Phase 1 durability means the applied value survives
 // independently of Raft's (unpersisted) commit_index/last_applied — see
-// design notes §2.2.
+// Step 7b design notes §2.2.
 void test_applied_data_survives_restart_independently_of_raft_state() {
     const std::string prefix = "apply_test_restart";
     clean_node_files(prefix + "_n0");
@@ -164,7 +173,8 @@ void test_applied_data_survives_restart_independently_of_raft_state() {
                                           prefix + "_n1.kv");
         elect_two_node_leader(leader, follower);
 
-        const auto put_result = leader.ProposePut("durable_key", "durable_value");
+        const auto put_result =
+            leader.ProposePut(/*client_id=*/1, /*sequence_num=*/1, "durable_key", "durable_value");
         relay_append_entries(put_result.result.to_send, leader, follower);
 
         std::string value;
@@ -181,12 +191,57 @@ void test_applied_data_survives_restart_independently_of_raft_state() {
     CHECK(value == "durable_value");
 }
 
+// Step 9a: a retried request (same client_id, same sequence_num) must be
+// a no-op at apply time, even though it still produces a second,
+// separate log entry (propose-time dedup is explicitly not implemented
+// — see design notes §3.3).
+void test_retried_request_applies_only_once() {
+    const std::string prefix = "apply_test_dedup";
+    clean_node_files(prefix + "_n0");
+    clean_node_files(prefix + "_n1");
+
+    raft::PersistentRaftNode leader(0, prefix + "_n0.state", prefix + "_n0.log",
+                                    prefix + "_n0.kv");
+    raft::PersistentRaftNode follower(1, prefix + "_n1.state", prefix + "_n1.log",
+                                      prefix + "_n1.kv");
+    elect_two_node_leader(leader, follower);
+
+    constexpr raft::ClientId kClient = 99;
+
+    // First attempt: proposed, replicated, committed, applied normally.
+    const auto first = leader.ProposePut(kClient, /*sequence_num=*/1, "k", "original");
+    relay_append_entries(first.result.to_send, leader, follower);
+
+    std::string value;
+    CHECK(leader.Get("k", &value));
+    CHECK(value == "original");
+
+    // Retry: SAME client, SAME sequence_num, but a DIFFERENT value — as
+    // if the client resent its exact original request after a timeout,
+    // but something changed the value. Using a different value lets the
+    // test tell apart "was skipped" from "was reapplied with identical
+    // content by coincidence."
+    const auto retry = leader.ProposePut(kClient, /*sequence_num=*/1, "k", "SHOULD_NOT_APPLY");
+    relay_append_entries(retry.result.to_send, leader, follower);
+
+    CHECK(leader.Get("k", &value));
+    CHECK(value == "original");  // unchanged — the retry was a no-op
+
+    // A genuinely NEW request (next sequence number) still applies normally.
+    const auto next = leader.ProposePut(kClient, /*sequence_num=*/2, "k", "updated");
+    relay_append_entries(next.result.to_send, leader, follower);
+
+    CHECK(leader.Get("k", &value));
+    CHECK(value == "updated");
+}
+
 }  // namespace
 
 int main() {
     test_committed_put_is_applied_and_readable_on_leader();
     test_delete_removes_value_once_applied();
     test_applied_data_survives_restart_independently_of_raft_state();
+    test_retried_request_applies_only_once();
 
     if (g_failures == 0) {
         std::printf("apply_test: all checks passed\n");

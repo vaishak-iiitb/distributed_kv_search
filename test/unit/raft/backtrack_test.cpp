@@ -99,7 +99,7 @@ void test_diverged_follower_recovers_via_backtrack() {
     // Stale entries need a genuinely LOWER term than what the leader
     // will propose — same-term entries at the same index are guaranteed
     // identical by Raft's own invariants, so using the leader's current
-    // term here (as the first version of this test did) can never
+    // term here (as an earlier version of this test did) can never
     // trigger real conflict detection, only the harmless-duplicate path.
     const raft::Term stale_term = cluster.node(leader).current_term;
     cluster.node(1).log.append(stale_term, "stale_entry_1");
@@ -182,8 +182,6 @@ void test_matchindex_advances_after_successful_propose() {
     CHECK(cluster.node(leader).next_index.at(1) == 2);
     CHECK(cluster.node(leader).next_index.at(2) == 2);
 }
-
-
 
 // A fresh election must reset stale tracking from a prior term — a node
 // that lost leadership and later regains it should not reuse old

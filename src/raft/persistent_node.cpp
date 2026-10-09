@@ -1,7 +1,5 @@
 #include "raft/persistent_node.h"
 
-#include "raft/command.h"
-
 namespace raft {
 
 PersistentRaftNode::PersistentRaftNode(NodeId self_id, std::string state_path,
@@ -20,15 +18,7 @@ PersistentRaftNode::PersistentRaftNode(NodeId self_id, std::string state_path,
         state_.voted_for = persisted->voted_for;
     }
 
-    // commit_index/last_applied deliberately start at 0, even though the
-    // log we just replayed may contain entries that were committed
-    // before a crash. Neither is persisted (design doc §2.2), and this
-    // node has no way to know, from its log alone, which prefix was
-    // actually committed. It rediscovers that normally — from the
-    // current leader, or by winning an election itself. Whatever WAS
-    // durably applied to kv_engine_ before the crash is already there;
-    // see design notes §2.2 for why re-applying it again later is a
-    // safe, idempotent no-op.
+    // last_applied_seq_ starts empty on purpose — see design notes §3.2.
 }
 
 bool PersistentRaftNode::PersistTermVoteIfChanged(
@@ -55,19 +45,30 @@ bool PersistentRaftNode::PersistNewLogEntries(LogIndex old_log_size) {
 void PersistentRaftNode::ApplyCommitted(const std::vector<LogEntry>& to_apply) {
     for (const LogEntry& entry : to_apply) {
         const auto cmd = decode_command(entry.command);
-        if (!cmd) {
-            // Cannot have come from ProposePut/ProposeDelete — see
-            // design notes §3.3. Skip defensively rather than corrupt
-            // kv_engine_ or crash.
+        if (!cmd) continue;  // malformed — see Step 7b design notes §3.3
+
+        // Step 9a: apply-time dedup (design notes §2.1/§2.2). A request
+        // whose sequence_num is <= the last one we've already applied
+        // for this client is a retry of something already in effect —
+        // skip it, do not call Put/Delete again.
+        auto& last_seq = last_applied_seq_[cmd->client_id];  // 0 if first-ever
+        if (cmd->sequence_num <= last_seq && last_applied_seq_.count(cmd->client_id) > 0 &&
+            last_seq != 0) {
             continue;
         }
+        // Note: a fresh client's very first request legitimately has
+        // last_seq == 0 after map default-construction, which could
+        // collide with a (disallowed) sequence_num of 0 — client
+        // sequence numbers are expected to start at 1, matching
+        // "monotonically increasing" starting from a real first value
+        // (design notes §2.3); sequence_num 0 is never a valid request.
+
         if (cmd->type == CommandType::kPut) {
             kv_engine_.Put(cmd->key, cmd->value);
         } else {
             kv_engine_.Delete(cmd->key);
         }
-        // A Put/Delete failure here is not surfaced — see design notes
-        // §3.4 for why that's a deliberate, acceptable boundary.
+        last_seq = cmd->sequence_num;
     }
 }
 
@@ -91,9 +92,6 @@ PersistentRaftNode::DurableResult PersistentRaftNode::Handle(
         return DurableResult{HandleResult{}, /*persisted=*/false};
     }
 
-    // Step 7b: apply after persistence succeeds — the entry is already
-    // durable in the Raft log regardless of whether this local apply
-    // succeeds (design notes §3.4).
     ApplyCommitted(result.to_apply);
 
     return DurableResult{std::move(result), /*persisted=*/true};
@@ -111,27 +109,29 @@ PersistentRaftNode::DurableProposeResult PersistentRaftNode::Propose(std::string
         return DurableProposeResult{ProposeResult{}, /*persisted=*/false};
     }
 
-    // propose() never advances commit_index in a real (>1 node) cluster
-    // (Step 7a design notes §3.3), so this is normally a no-op — applied
-    // anyway so the (out-of-scope) single-node case stays correct too.
     ApplyCommitted(result.to_send.to_apply);
 
     return DurableProposeResult{std::move(result), /*persisted=*/true};
 }
 
 PersistentRaftNode::DurableProposeResult PersistentRaftNode::ProposePut(
-    const std::string& key, const std::string& value) {
+    ClientId client_id, SequenceNum sequence_num, const std::string& key,
+    const std::string& value) {
     Command cmd;
     cmd.type = CommandType::kPut;
+    cmd.client_id = client_id;
+    cmd.sequence_num = sequence_num;
     cmd.key = key;
     cmd.value = value;
     return Propose(encode_command(cmd));
 }
 
 PersistentRaftNode::DurableProposeResult PersistentRaftNode::ProposeDelete(
-    const std::string& key) {
+    ClientId client_id, SequenceNum sequence_num, const std::string& key) {
     Command cmd;
     cmd.type = CommandType::kDelete;
+    cmd.client_id = client_id;
+    cmd.sequence_num = sequence_num;
     cmd.key = key;
     return Propose(encode_command(cmd));
 }

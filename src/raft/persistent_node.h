@@ -1,8 +1,10 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 
+#include "raft/command.h"
 #include "raft/persistence.h"
 #include "raft/state_machine.h"
 #include "storage/kv_engine.h"
@@ -11,10 +13,6 @@ namespace raft {
 
 class PersistentRaftNode {
 public:
-    // `kv_data_dir` is passed straight through to KVEngine's own
-    // constructor (Phase 1) — a directory separate from state_path/
-    // log_path, since KVEngine manages its own WAL/SSTable files there,
-    // fully independently of Raft's own persistence (Step 5).
     PersistentRaftNode(NodeId self_id, std::string state_path, std::string log_path,
                        std::string kv_data_dir);
 
@@ -32,15 +30,15 @@ public:
     };
     DurableProposeResult Propose(std::string command);
 
-    // Convenience wrappers over Propose() + encode_command — see design
-    // notes §3.1 for why command encoding lives outside Raft's own
-    // types, and why these exist anyway for ergonomics.
-    DurableProposeResult ProposePut(const std::string& key, const std::string& value);
-    DurableProposeResult ProposeDelete(const std::string& key);
+    // Step 9a: client_id/sequence_num identify the request for apply-
+    // time deduplication (design notes §2.1/§3.2) — NOT checked here at
+    // propose time (design notes §3.3); a retried request still appends
+    // a new log entry, but will be a no-op when applied.
+    DurableProposeResult ProposePut(ClientId client_id, SequenceNum sequence_num,
+                                    const std::string& key, const std::string& value);
+    DurableProposeResult ProposeDelete(ClientId client_id, SequenceNum sequence_num,
+                                       const std::string& key);
 
-    // Raw local read of whatever has been applied on THIS node so far.
-    // NOT linearizable — see design notes §2.3. Real Get, with
-    // linearizability, is Step 9's scope.
     bool Get(const std::string& key, std::string* out_value);
 
 private:
@@ -52,6 +50,11 @@ private:
     TermVoteStore term_store_;
     PersistedLogStore log_store_;
     KVEngine kv_engine_;
+
+    // Step 9a: last applied sequence number per client — volatile, not
+    // persisted. See design notes §3.2 for why that's a bounded,
+    // defensible simplification here, not a silent gap.
+    std::map<ClientId, SequenceNum> last_applied_seq_;
 };
 
 }  // namespace raft

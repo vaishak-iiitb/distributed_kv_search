@@ -1,0 +1,1161 @@
+​
+#pragma once
+
+#include <atomic>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "net/thread_pool.h"
+#include "raft/raft_node.h"
+
+namespace raft {
+
+// The client-facing server (design notes §1/§3.1) — a new, separate
+// server from TCPServer, on its own port, speaking the line protocol
+// specified in design notes §2.1. Wraps a RaftNode: every write goes
+// through propose-and-wait-for-commit (Step 9c part 1), every rejected
+// write carries a redirect hint if one is known (Step 9b), and every
+// write is deduplicated by (client_id, sequence_num) at apply time
+// (Step 9a).
+class ClientServer {
+public:
+        // `client_peer_addresses` maps every OTHER node's id to its OWN
+    // client-facing address — NOT its Raft-to-Raft address. Those are
+    // two different port spaces; RaftNode's own peer map can't be
+    // reused for this.
+    ClientServer(int port, RaftNode* node, std::map<NodeId, PeerAddress> client_peer_addresses,
+                Duration propose_timeout = Duration(2000), std::size_t thread_pool_size = 4);
+    ~ClientServer();
+
+    ClientServer(const ClientServer&) = delete;
+    ClientServer& operator=(const ClientServer&) = delete;
+
+    bool Start();
+    void Stop();
+
+private:
+    void AcceptLoop();
+    void HandleClient(int fd);
+    std::string HandleLine(const std::string& line);
+    std::string FormatProposeOutcome(const RaftNode::ProposeWaitResult& result);
+
+    int port_;
+    RaftNode* node_;
+    std::map<NodeId, PeerAddress> client_peer_addresses_;
+    Duration propose_timeout_;
+
+    int listen_fd_ = -1;
+    std::atomic<bool> running_{false};
+    std::thread accept_thread_;
+
+    std::mutex inbound_mutex_;
+    std::vector<int> inbound_fds_;
+
+    // Declared last so it is destroyed first — see design notes §3.2
+    // (reusing the exact lesson from Step 8a's RaftTransport).
+    ThreadPool pool_;
+};
+
+}  // namespace raft
+
+
+
+/////////////////////////////////////////////////////////////////////
+
+#include "raft/client_server.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <csignal>
+#include <cstring>
+#include <sstream>
+
+namespace raft {
+namespace {
+
+bool write_all(int fd, const char* data, std::size_t len) {
+    std::size_t sent = 0;
+    while (sent < len) {
+        const ssize_t n = ::write(fd, data + sent, len - sent);
+        if (n <= 0) return false;
+        sent += static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+}  // namespace
+
+ClientServer::ClientServer(int port, RaftNode* node,
+                           std::map<NodeId, PeerAddress> client_peer_addresses,
+                           Duration propose_timeout, std::size_t thread_pool_size)
+    : port_(port),
+      node_(node),
+      client_peer_addresses_(std::move(client_peer_addresses)),
+      propose_timeout_(propose_timeout),
+      pool_(thread_pool_size) {}
+
+ClientServer::~ClientServer() { Stop(); }
+
+bool ClientServer::Start() {
+    // See Step 8a design notes §4 — writing to a socket whose peer just
+    // closed can raise SIGPIPE, whose default disposition would kill
+    // this whole process. Safe to call repeatedly.
+    std::signal(SIGPIPE, SIG_IGN);
+
+    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd_ < 0) return false;
+
+    int opt = 1;
+    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(port_));
+
+    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        return false;
+    }
+    if (::listen(listen_fd_, 16) < 0) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        return false;
+    }
+
+    running_ = true;
+    accept_thread_ = std::thread(&ClientServer::AcceptLoop, this);
+    return true;
+}
+
+void ClientServer::Stop() {
+    if (!running_.exchange(false)) return;
+
+    if (listen_fd_ >= 0) {
+        ::shutdown(listen_fd_, SHUT_RDWR);
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+    }
+    if (accept_thread_.joinable()) accept_thread_.join();
+
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        for (int fd : inbound_fds_) {
+            ::shutdown(fd, SHUT_RDWR);
+        }
+    }
+    // pool_'s destructor (run via this object's own destructor, after
+    // Stop() returns) joins every worker — see design notes §3.2.
+}
+
+void ClientServer::AcceptLoop() {
+    while (running_) {
+        sockaddr_in client_addr{};
+        socklen_t len = sizeof(client_addr);
+        const int client_fd =
+            ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &len);
+        if (client_fd < 0) {
+            if (!running_) break;
+            continue;
+        }
+        pool_.Enqueue([this, client_fd] { HandleClient(client_fd); });
+    }
+}
+
+void ClientServer::HandleClient(int fd) {
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        inbound_fds_.push_back(fd);
+    }
+
+    std::string buffer;
+    char chunk[4096];
+    bool connection_ok = true;
+
+    while (connection_ok && running_) {
+        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+        if (n <= 0) break;
+        buffer.append(chunk, static_cast<std::size_t>(n));
+
+        std::size_t newline;
+        while ((newline = buffer.find('\n')) != std::string::npos) {
+            std::string line = buffer.substr(0, newline);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            buffer.erase(0, newline + 1);
+
+            const std::string response = HandleLine(line);
+            if (!write_all(fd, response.data(), response.size())) {
+                connection_ok = false;
+                break;
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        inbound_fds_.erase(std::remove(inbound_fds_.begin(), inbound_fds_.end(), fd),
+                           inbound_fds_.end());
+    }
+    ::close(fd);
+}
+
+std::string ClientServer::FormatProposeOutcome(const RaftNode::ProposeWaitResult& result) {
+    if (result.committed) return "OK\n";
+
+    if (!result.durable.persisted) {
+        return "ERROR local persistence failure\n";
+    }
+    if (!result.durable.result.accepted) {
+        // RaftNode's own hint.address, if present, is the leader's RAFT
+        // peer address — not client-reachable. Only hint.leader_id is
+        // reusable here; its client-facing address comes from this
+        // server's own map instead.
+        const auto hint = node_->KnownLeaderHint();
+        if (hint.leader_id.has_value()) {
+            const auto it = client_peer_addresses_.find(*hint.leader_id);
+            if (it != client_peer_addresses_.end()) {
+                return "NOT_LEADER " + it->second.host + ":" +
+                       std::to_string(it->second.port) + "\n";
+            }
+        }
+        return "NOT_LEADER\n";
+    }
+    return "TIMEOUT\n";
+}
+
+std::string ClientServer::HandleLine(const std::string& line) {
+    std::istringstream iss(line);
+    std::string verb;
+    iss >> verb;
+
+    if (verb == "GET") {
+        std::string key;
+        iss >> key;
+        if (key.empty()) return "ERROR missing key\n";
+
+        std::string value;
+        if (node_->Get(key, &value)) {
+            return "VALUE " + value + "\n";
+        }
+        return "NOT_FOUND\n";
+    }
+
+    if (verb == "PUT") {
+        ClientId client_id = 0;
+        SequenceNum sequence_num = 0;
+        std::string key;
+        if (!(iss >> client_id >> sequence_num >> key)) {
+            return "ERROR malformed PUT\n";
+        }
+        std::string value;
+        std::getline(iss, value);
+        if (!value.empty() && value.front() == ' ') value.erase(0, 1);
+
+        const auto result =
+            node_->ProposePutAndWait(client_id, sequence_num, key, value, propose_timeout_);
+        return FormatProposeOutcome(result);
+    }
+
+    if (verb == "DELETE") {
+        ClientId client_id = 0;
+        SequenceNum sequence_num = 0;
+        std::string key;
+        if (!(iss >> client_id >> sequence_num >> key)) {
+            return "ERROR malformed DELETE\n";
+        }
+
+        const auto result =
+            node_->ProposeDeleteAndWait(client_id, sequence_num, key, propose_timeout_);
+        return FormatProposeOutcome(result);
+    }
+
+    return "ERROR unknown command\n";
+}
+
+}  // namespace raft
+
+
+///////////////////////////////////////////////////////////
+
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+
+#include "raft/election_timer.h"
+#include "raft/persistent_node.h"
+#include "raft/raft_transport.h"
+
+namespace raft {
+
+struct RaftNodeConfig {
+    NodeId self_id = 0;
+    int listen_port = 0;
+    std::map<NodeId, PeerAddress> peers;
+    std::string state_path;
+    std::string log_path;
+    std::string kv_data_dir;
+
+    Duration election_timeout_min = Duration(150);
+    Duration election_timeout_max = Duration(300);
+    Duration heartbeat_interval = Duration(50);
+    std::uint64_t election_timer_seed = 0;
+};
+
+class RaftNode {
+public:
+    explicit RaftNode(RaftNodeConfig config);
+    ~RaftNode();
+
+    RaftNode(const RaftNode&) = delete;
+    RaftNode& operator=(const RaftNode&) = delete;
+
+    bool Start();
+    void Stop();
+
+    // Non-blocking: returns once the entry is proposed and persisted
+    // locally, NOT once committed. Kept for callers that manage their
+    // own waiting (e.g. tests) — see *_AndWait below for the
+    // commit-aware versions a real client should use.
+    PersistentRaftNode::DurableProposeResult ProposePut(ClientId client_id,
+                                                        SequenceNum sequence_num,
+                                                        const std::string& key,
+                                                        const std::string& value);
+    PersistentRaftNode::DurableProposeResult ProposeDelete(ClientId client_id,
+                                                           SequenceNum sequence_num,
+                                                           const std::string& key);
+
+    // Step 9c: blocks until the proposed entry commits, the outcome
+    // becomes ambiguous (leadership/term changed), or `timeout` elapses
+    // — see design notes §2.2 for what each outcome means and why only
+    // `committed` is a confident success.
+    struct ProposeWaitResult {
+        PersistentRaftNode::DurableProposeResult durable;
+        bool committed = false;
+        bool lost_leadership = false;
+        bool timed_out = false;
+    };
+    ProposeWaitResult ProposePutAndWait(ClientId client_id, SequenceNum sequence_num,
+                                        const std::string& key, const std::string& value,
+                                        Duration timeout);
+    ProposeWaitResult ProposeDeleteAndWait(ClientId client_id, SequenceNum sequence_num,
+                                           const std::string& key, Duration timeout);
+
+    bool Get(const std::string& key, std::string* out_value);
+
+    Role CurrentRole();
+
+    struct LeaderHint {
+        std::optional<NodeId> leader_id;
+        std::optional<PeerAddress> address;
+    };
+    LeaderHint KnownLeaderHint();
+
+private:
+    void OnMessage(NodeId from, const Message& message);
+    void DrivingLoop();
+    void DispatchAndSend(const HandleResult& result);
+    void ResetElectionTimerIfWarranted(const HandleResult& result);
+    void UpdateKnownLeader(const Event& event, const HandleResult& result);
+    AppendEntriesRequest BuildHeartbeatFor(NodeId peer);
+
+    // Step 9c: shared by both *_AndWait methods — see design notes §3.1.
+    // Caller must NOT hold node_mutex_ when calling this.
+    ProposeWaitResult WaitForCommit(Term proposed_term, LogIndex proposed_index,
+                                    Duration timeout,
+                                    PersistentRaftNode::DurableProposeResult durable);
+
+    RaftNodeConfig config_;
+    std::size_t cluster_size_;
+
+    std::mutex node_mutex_;
+    PersistentRaftNode node_;
+    ElectionTimer election_timer_;
+    std::optional<NodeId> known_leader_;
+
+    // Step 9c: notified after every Handle() call that actually ran
+    // (persisted == true) — see design notes §3.2 for why unconditional
+    // notification is the right call here.
+    std::condition_variable state_changed_cv_;
+
+    RaftTransport transport_;
+
+    std::atomic<bool> running_{false};
+    std::thread driving_thread_;
+    TimePoint last_heartbeat_sent_;
+};
+
+}  // namespace raft
+
+
+
+/////////////////////////////////////////////////////////////////
+
+#include "raft/raft_node.h"
+
+#include <chrono>
+#include <cstdio>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <thread>
+#include <vector>
+
+namespace {
+
+int g_failures = 0;
+
+#define CHECK(cond)                                                          \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__,      \
+                         __LINE__, #cond);                                   \
+            ++g_failures;                                                    \
+        }                                                                    \
+    } while (0)
+
+void remove_if_exists(const std::string& path) { std::remove(path.c_str()); }
+
+bool WaitUntil(const std::function<bool()>& predicate, std::chrono::milliseconds timeout,
+              std::chrono::milliseconds poll = std::chrono::milliseconds(20)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(poll);
+    }
+    return predicate();
+}
+
+// Short but safe timings: 100-200ms election range, 30ms heartbeat —
+// comfortably inside validate_timing_config's 2x margin (Step 3a),
+// while keeping this test suite fast.
+raft::RaftNodeConfig MakeConfig(raft::NodeId id, int base_port,
+                                const std::vector<raft::NodeId>& all_ids,
+                                const std::string& prefix) {
+    raft::RaftNodeConfig cfg;
+    cfg.self_id = id;
+    cfg.listen_port = base_port + static_cast<int>(id);
+    for (raft::NodeId peer : all_ids) {
+        if (peer == id) continue;
+        cfg.peers[peer] = raft::PeerAddress{"127.0.0.1", base_port + static_cast<int>(peer)};
+    }
+    cfg.state_path = prefix + "_n" + std::to_string(id) + ".state";
+    cfg.log_path = prefix + "_n" + std::to_string(id) + ".log";
+    cfg.kv_data_dir = prefix + "_n" + std::to_string(id) + ".kv";
+    cfg.election_timeout_min = raft::Duration(100);
+    cfg.election_timeout_max = raft::Duration(200);
+    cfg.heartbeat_interval = raft::Duration(30);
+    cfg.election_timer_seed = 1000 + id;
+    return cfg;
+}
+
+void CleanNodeFiles(const std::string& prefix, const std::vector<raft::NodeId>& ids) {
+    for (raft::NodeId id : ids) {
+        remove_if_exists(prefix + "_n" + std::to_string(id) + ".state");
+        remove_if_exists(prefix + "_n" + std::to_string(id) + ".log");
+    }
+}
+
+std::optional<raft::NodeId> FindLeader(std::vector<std::unique_ptr<raft::RaftNode>>& nodes,
+                                       const std::vector<raft::NodeId>& ids) {
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i]->CurrentRole() == raft::Role::kLeader) return ids[i];
+    }
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+
+void test_three_node_cluster_elects_leader_and_replicates() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "raft_node_test_basic";
+    CleanNodeFiles(prefix, ids);
+    const int base_port = 18100;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto leader_id = FindLeader(nodes, ids);
+    CHECK(leader_id.has_value());
+
+    if (leader_id) {
+        raft::RaftNode& leader = *nodes[*leader_id];
+        const auto p1 = leader.ProposePut(/*client_id=*/1, /*sequence_num=*/1, "x", "1");
+        CHECK(p1.persisted && p1.result.accepted);
+        const auto p2 = leader.ProposePut(/*client_id=*/2, /*sequence_num=*/1, "y", "2");
+        CHECK(p2.persisted && p2.result.accepted);
+
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            std::string value;
+            CHECK(WaitUntil([&] { return nodes[i]->Get("x", &value) && value == "1"; },
+                            std::chrono::milliseconds(3000)));
+        }
+    }
+
+    for (auto& node : nodes) node->Stop();
+    CleanNodeFiles(prefix, ids);
+}
+
+// The flagship plan's own milestone, literally: kill the leader
+// mid-operation, confirm a new leader is elected and the cluster keeps
+// accepting writes.
+void test_cluster_recovers_after_leader_stops() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "raft_node_test_recover";
+    CleanNodeFiles(prefix, ids);
+    const int base_port = 18200;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto first_leader = FindLeader(nodes, ids);
+    CHECK(first_leader.has_value());
+    if (!first_leader) return;
+
+    nodes[*first_leader]->Stop();  // the leader "dies"
+
+    std::optional<raft::NodeId> new_leader;
+    CHECK(WaitUntil(
+        [&] {
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                if (ids[i] == *first_leader) continue;
+                if (nodes[i]->CurrentRole() == raft::Role::kLeader) {
+                    new_leader = ids[i];
+                    return true;
+                }
+            }
+            return false;
+        },
+        std::chrono::milliseconds(3000)));
+
+    CHECK(new_leader.has_value());
+    CHECK(new_leader.has_value() && *new_leader != *first_leader);
+
+    if (new_leader) {
+        const auto p = nodes[*new_leader]->ProposePut(/*client_id=*/1, /*sequence_num=*/1, "after_failover", "ok");
+        CHECK(p.persisted && p.result.accepted);
+    }
+
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (ids[i] == *first_leader) continue;  // already stopped
+        nodes[i]->Stop();
+    }
+    CleanNodeFiles(prefix, ids);
+}
+
+}  // namespace
+
+void test_non_leader_reports_correct_leader_hint() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "raft_node_test_redirect";
+    CleanNodeFiles(prefix, ids);
+    const int base_port = 18300;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto leader_id = FindLeader(nodes, ids);
+    CHECK(leader_id.has_value());
+    if (!leader_id) return;
+
+    // A follower only records the leader hint once it has actually
+    // ACCEPTED an AppendEntries (design notes §2.1) — not merely once
+    // the election concluded — so give the first heartbeat a moment.
+    CHECK(WaitUntil(
+        [&] {
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                if (ids[i] == *leader_id) continue;
+                const auto hint = nodes[i]->KnownLeaderHint();
+                if (!hint.leader_id.has_value() || *hint.leader_id != *leader_id) return false;
+            }
+            return true;
+        },
+        std::chrono::milliseconds(2000)));
+
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (ids[i] == *leader_id) continue;
+        raft::RaftNode& follower = *nodes[i];
+
+        const auto p = follower.ProposePut(/*client_id=*/1, /*sequence_num=*/1, "x", "1");
+        CHECK(p.persisted);
+        CHECK(!p.result.accepted);  // this node isn't leader
+
+        const auto hint = follower.KnownLeaderHint();
+        CHECK(hint.leader_id.has_value() && *hint.leader_id == *leader_id);
+        CHECK(hint.address.has_value());
+        CHECK(hint.address->port == base_port + static_cast<int>(*leader_id));
+    }
+
+    for (auto& node : nodes) node->Stop();
+    CleanNodeFiles(prefix, ids);
+}
+void test_propose_and_wait_confirms_real_commit() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "raft_node_test_wait";
+    CleanNodeFiles(prefix, ids);
+    const int base_port = 18400;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto leader_id = FindLeader(nodes, ids);
+    CHECK(leader_id.has_value());
+    if (!leader_id) return;
+
+    const auto result = nodes[*leader_id]->ProposePutAndWait(
+        /*client_id=*/1, /*sequence_num=*/1, "x", "1", raft::Duration(2000));
+
+    CHECK(result.durable.persisted);
+    CHECK(result.durable.result.accepted);
+    CHECK(result.committed);
+    CHECK(!result.timed_out);
+    CHECK(!result.lost_leadership);
+
+    // Having returned "committed", the write must actually be durable
+    // on the leader right now — no further waiting needed.
+    std::string value;
+    CHECK(nodes[*leader_id]->Get("x", &value));
+    CHECK(value == "1");
+
+    for (auto& node : nodes) node->Stop();
+    CleanNodeFiles(prefix, ids);
+}
+
+// A write proposed to a node that then immediately stops (simulating a
+// crash right after proposing, before any peer could possibly ack) must
+// report an honest, ambiguous outcome — never a false "committed".
+void test_propose_and_wait_reports_ambiguous_outcome_on_stop() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "raft_node_test_wait_stop";
+    CleanNodeFiles(prefix, ids);
+    const int base_port = 18500;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto leader_id = FindLeader(nodes, ids);
+    CHECK(leader_id.has_value());
+    if (!leader_id) return;
+
+    // Stop every OTHER node first, so the leader has no one left to
+    // reach majority with — its wait can only time out or notice it's
+    // lost leadership, never confirm a real commit.
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (ids[i] == *leader_id) continue;
+        nodes[i]->Stop();
+    }
+
+    const auto result = nodes[*leader_id]->ProposePutAndWait(
+        /*client_id=*/2, /*sequence_num=*/1, "y", "2", raft::Duration(500));
+
+    CHECK(result.durable.persisted);
+    CHECK(result.durable.result.accepted);  // it WAS proposed — this node was leader
+    CHECK(!result.committed);               // but never confirmed as committed
+    CHECK(result.timed_out || result.lost_leadership);  // one honest, ambiguous outcome
+
+    nodes[*leader_id]->Stop();
+    CleanNodeFiles(prefix, ids);
+}
+
+int main() {
+    test_three_node_cluster_elects_leader_and_replicates();
+    test_cluster_recovers_after_leader_stops();
+    test_non_leader_reports_correct_leader_hint();
+    test_propose_and_wait_confirms_real_commit();
+    test_propose_and_wait_reports_ambiguous_outcome_on_stop();
+    if (g_failures == 0) {
+        std::printf("raft_node_cluster_test: all checks passed\n");
+        return 0;
+    }
+    std::fprintf(stderr, "raft_node_cluster_test: %d check(s) failed\n", g_failures);
+    return 1;
+}
+
+/////////////////////////////////////////////////////////
+#include "raft/client_server.h"
+#include "raft/raft_node.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cstdio>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+int g_failures = 0;
+
+#define CHECK(cond)                                                          \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__,      \
+                         __LINE__, #cond);                                   \
+            ++g_failures;                                                    \
+        }                                                                    \
+    } while (0)
+
+void remove_if_exists(const std::string& path) { std::remove(path.c_str()); }
+
+bool WaitUntil(const std::function<bool()>& predicate, std::chrono::milliseconds timeout,
+              std::chrono::milliseconds poll = std::chrono::milliseconds(20)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(poll);
+    }
+    return predicate();
+}
+
+// A minimal, synchronous, one-shot raw-socket client: connect, send one
+// line, read one line back, disconnect. Good enough to exercise the
+// protocol; not meant to be a reusable client library.
+std::optional<std::string> SendLine(int port, const std::string& request_line) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return std::nullopt;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
+        return std::nullopt;
+    }
+
+    const std::string line = request_line + "\n";
+    if (::write(fd, line.data(), line.size()) < 0) {
+        ::close(fd);
+        return std::nullopt;
+    }
+
+    std::string response;
+    char buf[4096];
+    while (response.find('\n') == std::string::npos) {
+        const ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n <= 0) {
+            ::close(fd);
+            return response.empty() ? std::nullopt : std::make_optional(response);
+        }
+        response.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+
+    if (!response.empty() && response.back() == '\n') response.pop_back();
+    return response;
+}
+
+raft::RaftNodeConfig MakeConfig(raft::NodeId id, int base_port,
+                                const std::vector<raft::NodeId>& all_ids,
+                                const std::string& prefix) {
+    raft::RaftNodeConfig cfg;
+    cfg.self_id = id;
+    cfg.listen_port = base_port + static_cast<int>(id);
+    for (raft::NodeId peer : all_ids) {
+        if (peer == id) continue;
+        cfg.peers[peer] = raft::PeerAddress{"127.0.0.1", base_port + static_cast<int>(peer)};
+    }
+    cfg.state_path = prefix + "_n" + std::to_string(id) + ".state";
+    cfg.log_path = prefix + "_n" + std::to_string(id) + ".log";
+    cfg.kv_data_dir = prefix + "_n" + std::to_string(id) + ".kv";
+    cfg.election_timeout_min = raft::Duration(100);
+    cfg.election_timeout_max = raft::Duration(200);
+    cfg.heartbeat_interval = raft::Duration(30);
+    cfg.election_timer_seed = 2000 + id;
+    return cfg;
+}
+
+void CleanNodeFiles(const std::string& prefix, const std::vector<raft::NodeId>& ids) {
+    for (raft::NodeId id : ids) {
+        remove_if_exists(prefix + "_n" + std::to_string(id) + ".state");
+        remove_if_exists(prefix + "_n" + std::to_string(id) + ".log");
+    }
+}
+
+std::optional<raft::NodeId> FindLeader(std::vector<std::unique_ptr<raft::RaftNode>>& nodes,
+                                       const std::vector<raft::NodeId>& ids) {
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i]->CurrentRole() == raft::Role::kLeader) return ids[i];
+    }
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+
+void test_put_get_and_redirect_over_real_sockets() {
+    const std::vector<raft::NodeId> ids = {0, 1, 2};
+    const std::string prefix = "client_server_test";
+    CleanNodeFiles(prefix, ids);
+    const int raft_base_port = 18600;
+    const int client_base_port = 18700;
+
+    std::vector<std::unique_ptr<raft::RaftNode>> nodes;
+    std::vector<std::unique_ptr<raft::ClientServer>> servers;
+    for (raft::NodeId id : ids) {
+        nodes.push_back(
+            std::make_unique<raft::RaftNode>(MakeConfig(id, raft_base_port, ids, prefix)));
+        CHECK(nodes.back()->Start());
+
+        // Every OTHER node's id mapped to ITS client-facing address —
+        // separate from RaftNode's own Raft-to-Raft peer map.
+        std::map<raft::NodeId, raft::PeerAddress> client_peer_addresses;
+        for (raft::NodeId peer : ids) {
+            if (peer == id) continue;
+            client_peer_addresses[peer] =
+                raft::PeerAddress{"127.0.0.1", client_base_port + static_cast<int>(peer)};
+        }
+
+        servers.push_back(std::make_unique<raft::ClientServer>(
+            client_base_port + static_cast<int>(id), nodes.back().get(),
+            std::move(client_peer_addresses)));
+        CHECK(servers.back()->Start());
+    }
+
+    CHECK(WaitUntil([&] { return FindLeader(nodes, ids).has_value(); },
+                    std::chrono::milliseconds(3000)));
+    const auto leader_id = FindLeader(nodes, ids);
+    CHECK(leader_id.has_value());
+    if (!leader_id) return;
+
+    // A write to a FOLLOWER must be redirected, not silently dropped —
+    // and must redirect to the real leader's actual client-facing port
+    // once that follower has learned who leads (Step 9b, exercised here
+    // through the real wire protocol instead of KnownLeaderHint() directly).
+    raft::NodeId follower_id = (*leader_id == 0) ? 1 : 0;
+    CHECK(WaitUntil(
+        [&] {
+            const auto resp = SendLine(client_base_port + static_cast<int>(follower_id),
+                                       "PUT 1 1 x 1");
+            return resp.has_value() && resp->rfind("NOT_LEADER ", 0) == 0;
+        },
+        std::chrono::milliseconds(2000)));
+
+    const auto redirect_resp =
+        SendLine(client_base_port + static_cast<int>(follower_id), "PUT 1 1 x 1");
+    CHECK(redirect_resp.has_value());
+    CHECK(redirect_resp->rfind("NOT_LEADER 127.0.0.1:", 0) == 0);
+    const std::string expected_port =
+        std::to_string(client_base_port + static_cast<int>(*leader_id));
+    CHECK(redirect_resp->find(expected_port) != std::string::npos);
+
+    // A write to the REAL leader must succeed.
+    const auto put_resp =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "PUT 1 1 x 1");
+    CHECK(put_resp.has_value() && *put_resp == "OK");
+
+    // Readable immediately on the leader.
+    const auto get_resp = SendLine(client_base_port + static_cast<int>(*leader_id), "GET x");
+    CHECK(get_resp.has_value() && *get_resp == "VALUE 1");
+
+    // A value containing a space round-trips correctly (design notes §2.1).
+    const auto put_spaced =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "PUT 1 2 greeting hello world");
+    CHECK(put_spaced.has_value() && *put_spaced == "OK");
+    const auto get_spaced = SendLine(client_base_port + static_cast<int>(*leader_id), "GET greeting");
+    CHECK(get_spaced.has_value() && *get_spaced == "VALUE hello world");
+
+    // A missing key.
+    const auto get_missing =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "GET does_not_exist");
+    CHECK(get_missing.has_value() && *get_missing == "NOT_FOUND");
+
+    // A retried write (same client_id/sequence_num) must still report OK
+    // (it's a safe no-op per Step 9a) and must not change the value.
+    const auto retry_resp =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "PUT 1 1 x 999");
+    CHECK(retry_resp.has_value() && *retry_resp == "OK");
+    const auto get_after_retry = SendLine(client_base_port + static_cast<int>(*leader_id), "GET x");
+    CHECK(get_after_retry.has_value() && *get_after_retry == "VALUE 1");  // unchanged
+
+    // DELETE.
+    const auto delete_resp =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "DELETE 1 3 x");
+    CHECK(delete_resp.has_value() && *delete_resp == "OK");
+    const auto get_after_delete = SendLine(client_base_port + static_cast<int>(*leader_id), "GET x");
+    CHECK(get_after_delete.has_value() && *get_after_delete == "NOT_FOUND");
+
+    // Malformed request.
+    const auto malformed_resp =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "PUT not enough fields");
+    CHECK(malformed_resp.has_value() && malformed_resp->rfind("ERROR", 0) == 0);
+
+    for (auto& server : servers) server->Stop();
+    for (auto& node : nodes) node->Stop();
+    CleanNodeFiles(prefix, ids);
+}
+
+}  // namespace
+
+int main() {
+    test_put_get_and_redirect_over_real_sockets();
+
+    if (g_failures == 0) {
+        std::printf("client_server_test: all checks passed\n");
+        return 0;
+    }
+    std::fprintf(stderr, "client_server_test: %d check(s) failed\n", g_failures);
+    return 1;
+}
+
+
+//////////////////////////////////////////////////
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <cstdlib>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+int main(int argc, char** argv) {
+  if (argc < 4) {
+    std::cerr << "Usage: " << argv[0]
+              << " <host> <port> <PUT key value | GET key | DELETE key>\n";
+    return 1;
+  }
+
+  std::string host = argv[1];
+  int port = std::atoi(argv[2]);
+
+  std::ostringstream command;
+  for (int i = 3; i < argc; i++) {
+    command << argv[i];
+    if (i + 1 < argc) command << " ";
+  }
+  command << "\n";
+
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+  if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    std::cerr << "Could not connect to " << host << ":" << port << "\n";
+    return 1;
+  }
+
+  std::string cmd_str = command.str();
+  send(sock, cmd_str.data(), cmd_str.size(), 0);
+
+  char buf[4096];
+  ssize_t n = recv(sock, buf, sizeof(buf), 0);
+  if (n > 0) {
+    std::cout.write(buf, n);
+  }
+
+  close(sock);
+  return 0;
+}
+
+
+
+///////////////////////////////////////////////
+
+
+cmake_minimum_required(VERSION 3.16)
+project(distributed_kv_store CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g")
+
+find_package(Threads REQUIRED)
+enable_testing()
+
+add_library(storage
+src/storage/skiplist.cpp
+src/storage/wal.cpp
+src/storage/memtable.cpp
+src/storage/bloom_filter.cpp
+src/storage/sstable.cpp
+src/storage/compaction.cpp
+src/storage/kv_engine.cpp
+)
+target_include_directories(storage PUBLIC src)
+target_link_libraries(storage PUBLIC Threads::Threads)
+
+add_library(net
+src/net/thread_pool.cpp
+src/net/tcp_server.cpp
+)
+target_include_directories(net PUBLIC src)
+target_link_libraries(net PUBLIC storage Threads::Threads)
+
+add_library(raft
+src/raft/rpc.cpp
+src/raft/log.cpp
+src/raft/state_machine.cpp
+src/raft/fake_cluster.cpp
+src/raft/election_timer.cpp
+src/raft/persistence.cpp
+src/raft/persistent_node.cpp
+src/raft/command.cpp
+src/raft/raft_transport.cpp
+src/raft/raft_node.cpp
+src/raft/client_server.cpp
+)
+target_include_directories(raft PUBLIC src)
+target_link_libraries(raft PUBLIC net storage Threads::Threads)
+
+# --- storage unit tests ---
+add_executable(test_skiplist test/unit/storage/test_skiplist.cpp)
+target_link_libraries(test_skiplist PRIVATE storage)
+add_test(NAME test_skiplist COMMAND test_skiplist)
+
+add_executable(test_wal test/unit/storage/test_wal.cpp)
+target_link_libraries(test_wal PRIVATE storage)
+add_test(NAME test_wal COMMAND test_wal)
+add_executable(test_memtable test/unit/storage/test_memtable.cpp)
+target_link_libraries(test_memtable PRIVATE storage)
+add_test(NAME test_memtable COMMAND test_memtable)
+
+add_executable(test_bloom_filter test/unit/storage/test_bloom_filter.cpp)
+target_link_libraries(test_bloom_filter PRIVATE storage)
+add_test(NAME test_bloom_filter COMMAND test_bloom_filter)
+
+add_executable(test_sstable test/unit/storage/test_sstable.cpp)
+target_link_libraries(test_sstable PRIVATE storage)
+add_test(NAME test_sstable COMMAND test_sstable)
+
+add_executable(test_compaction test/unit/storage/test_compaction.cpp)
+target_link_libraries(test_compaction PRIVATE storage)
+add_test(NAME test_compaction COMMAND test_compaction)
+
+# --- raft unit tests ---
+add_executable(rpc_test test/unit/raft/rpc_test.cpp)
+target_link_libraries(rpc_test PRIVATE raft)
+add_test(NAME rpc_test COMMAND rpc_test)
+
+add_executable(test_state_machine test/unit/raft/test_state_machine.cpp)
+target_link_libraries(test_state_machine PRIVATE raft)
+add_test(NAME test_state_machine COMMAND test_state_machine)
+
+add_executable(fake_cluster_test test/unit/raft/fake_cluster_test.cpp)
+target_link_libraries(fake_cluster_test PRIVATE raft)
+add_test(NAME fake_cluster_test COMMAND fake_cluster_test)
+
+add_executable(election_timer_test test/unit/raft/election_timer_test.cpp)
+target_link_libraries(election_timer_test PRIVATE raft)
+add_test(NAME election_timer_test COMMAND election_timer_test)
+
+add_executable(log_test test/unit/raft/log_test.cpp)
+target_link_libraries(log_test PRIVATE raft)
+add_test(NAME log_test COMMAND log_test)
+
+add_executable(replication_test test/unit/raft/replication_test.cpp)
+target_link_libraries(replication_test PRIVATE raft)
+add_test(NAME replication_test COMMAND replication_test)
+
+add_executable(persistence_test test/unit/raft/persistence_test.cpp)
+target_link_libraries(persistence_test PRIVATE raft)
+add_test(NAME persistence_test COMMAND persistence_test)
+
+add_executable(persistent_node_test test/unit/raft/persistent_node_test.cpp)
+target_link_libraries(persistent_node_test PRIVATE raft)
+add_test(NAME persistent_node_test COMMAND persistent_node_test)
+
+add_executable(backtrack_test test/unit/raft/backtrack_test.cpp)
+target_link_libraries(backtrack_test PRIVATE raft)
+add_test(NAME backtrack_test COMMAND backtrack_test)
+
+add_executable(commit_test test/unit/raft/commit_test.cpp)
+target_link_libraries(commit_test PRIVATE raft)
+add_test(NAME commit_test COMMAND commit_test)
+
+add_executable(command_test test/unit/raft/command_test.cpp)
+target_link_libraries(command_test PRIVATE raft)
+add_test(NAME command_test COMMAND command_test)
+
+add_executable(apply_test test/unit/raft/apply_test.cpp)
+target_link_libraries(apply_test PRIVATE raft)
+add_test(NAME apply_test COMMAND apply_test)
+
+add_executable(raft_transport_test test/unit/raft/raft_transport_test.cpp)
+target_link_libraries(raft_transport_test PRIVATE raft)
+add_test(NAME raft_transport_test COMMAND raft_transport_test)
+
+# --- integration tests (real sockets, real disk) ---
+add_executable(test_tcp_server test/integration/tcp_server_test.cpp)
+target_link_libraries(test_tcp_server PRIVATE net storage)
+add_test(NAME test_tcp_server COMMAND test_tcp_server)
+
+add_executable(raft_node_cluster_test test/integration/raft_node_cluster_test.cpp)
+target_link_libraries(raft_node_cluster_test PRIVATE raft)
+add_test(NAME raft_node_cluster_test COMMAND raft_node_cluster_test)
+
+add_executable(client_server_test test/integration/client_server_test.cpp)
+target_link_libraries(client_server_test PRIVATE raft)
+add_test(NAME client_server_test COMMAND client_server_test)
+
+# --- server binary + manual CLI client ---
+add_executable(kv_server src/server_main.cpp)
+target_link_libraries(kv_server PRIVATE net storage)
+
+add_executable(cli tools/cli.cpp)
+
+# ---- Phase 3: sharding ----
+add_library(sharding
+  src/sharding/hash_ring.cpp
+  src/sharding/shard_map.cpp)
+target_include_directories(sharding PUBLIC src)
+
+add_executable(test_hash_ring test/unit/sharding/test_hash_ring.cpp)
+target_link_libraries(test_hash_ring sharding)
+
+add_executable(test_shard_map test/unit/sharding/test_shard_map.cpp)
+target_link_libraries(test_shard_map sharding)

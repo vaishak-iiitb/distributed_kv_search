@@ -1,9 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -16,7 +18,7 @@ namespace raft {
 struct RaftNodeConfig {
     NodeId self_id = 0;
     int listen_port = 0;
-    std::map<NodeId, PeerAddress> peers;  // every OTHER node in the cluster
+    std::map<NodeId, PeerAddress> peers;
     std::string state_path;
     std::string log_path;
     std::string kv_data_dir;
@@ -27,16 +29,6 @@ struct RaftNodeConfig {
     std::uint64_t election_timer_seed = 0;
 };
 
-// The production driving loop. Owns a PersistentRaftNode, a
-// RaftTransport, and an ElectionTimer, and ties them together with a
-// background thread that fires ElectionTimeout on real timeout and
-// sends periodic leader heartbeats — this project's first real use of
-// ElectionTimer against actual elapsed time (Step 3a).
-//
-// Every access to the underlying PersistentRaftNode goes through
-// node_mutex_ — this is where the "no locking" gap flagged since Step
-// 2a's design notes (§4) is closed, in one place, rather than inside
-// state_machine.h itself.
 class RaftNode {
 public:
     explicit RaftNode(RaftNodeConfig config);
@@ -45,28 +37,60 @@ public:
     RaftNode(const RaftNode&) = delete;
     RaftNode& operator=(const RaftNode&) = delete;
 
-    // Starts the transport and the background driving thread. False if
-    // the transport fails to bind/listen, or if the timing config fails
-    // validate_timing_config (Step 3a) — see design notes §3.4.
     bool Start();
     void Stop();
 
-    // Thread-safe. NOT linearizable yet — see Step 7b design notes §2.3,
-    // still true here; real client redirect and read guarantees are
-    // Step 9.
-    PersistentRaftNode::DurableProposeResult ProposePut(const std::string& key,
+    // Non-blocking: returns once the entry is proposed and persisted
+    // locally, NOT once committed. Kept for callers that manage their
+    // own waiting (e.g. tests) — see *_AndWait below for the
+    // commit-aware versions a real client should use.
+    PersistentRaftNode::DurableProposeResult ProposePut(ClientId client_id,
+                                                        SequenceNum sequence_num,
+                                                        const std::string& key,
                                                         const std::string& value);
-    PersistentRaftNode::DurableProposeResult ProposeDelete(const std::string& key);
+    PersistentRaftNode::DurableProposeResult ProposeDelete(ClientId client_id,
+                                                           SequenceNum sequence_num,
+                                                           const std::string& key);
+
+    // Step 9c: blocks until the proposed entry commits, the outcome
+    // becomes ambiguous (leadership/term changed), or `timeout` elapses
+    // — see design notes §2.2 for what each outcome means and why only
+    // `committed` is a confident success.
+    struct ProposeWaitResult {
+        PersistentRaftNode::DurableProposeResult durable;
+        bool committed = false;
+        bool lost_leadership = false;
+        bool timed_out = false;
+    };
+    ProposeWaitResult ProposePutAndWait(ClientId client_id, SequenceNum sequence_num,
+                                        const std::string& key, const std::string& value,
+                                        Duration timeout);
+    ProposeWaitResult ProposeDeleteAndWait(ClientId client_id, SequenceNum sequence_num,
+                                           const std::string& key, Duration timeout);
+
     bool Get(const std::string& key, std::string* out_value);
 
     Role CurrentRole();
+
+    struct LeaderHint {
+        std::optional<NodeId> leader_id;
+        std::optional<PeerAddress> address;
+    };
+    LeaderHint KnownLeaderHint();
 
 private:
     void OnMessage(NodeId from, const Message& message);
     void DrivingLoop();
     void DispatchAndSend(const HandleResult& result);
-    void ResetElectionTimerIfWarranted(const HandleResult& result);  // caller holds node_mutex_
-    AppendEntriesRequest BuildHeartbeatFor(NodeId peer);             // caller holds node_mutex_
+    void ResetElectionTimerIfWarranted(const HandleResult& result);
+    void UpdateKnownLeader(const Event& event, const HandleResult& result);
+    AppendEntriesRequest BuildHeartbeatFor(NodeId peer);
+
+    // Step 9c: shared by both *_AndWait methods — see design notes §3.1.
+    // Caller must NOT hold node_mutex_ when calling this.
+    ProposeWaitResult WaitForCommit(Term proposed_term, LogIndex proposed_index,
+                                    Duration timeout,
+                                    PersistentRaftNode::DurableProposeResult durable);
 
     RaftNodeConfig config_;
     std::size_t cluster_size_;
@@ -74,6 +98,12 @@ private:
     std::mutex node_mutex_;
     PersistentRaftNode node_;
     ElectionTimer election_timer_;
+    std::optional<NodeId> known_leader_;
+
+    // Step 9c: notified after every Handle() call that actually ran
+    // (persisted == true) — see design notes §3.2 for why unconditional
+    // notification is the right call here.
+    std::condition_variable state_changed_cv_;
 
     RaftTransport transport_;
 
