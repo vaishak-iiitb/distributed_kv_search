@@ -23,6 +23,8 @@ target_link_libraries(storage PUBLIC Threads::Threads)
 add_library(net
 src/net/thread_pool.cpp
 src/net/tcp_server.cpp
+src/net/line_client.cpp
+
 )
 target_include_directories(net PUBLIC src)
 target_link_libraries(net PUBLIC storage Threads::Threads)
@@ -142,11 +144,55 @@ add_executable(cli tools/cli.cpp)
 # ---- Phase 3: sharding ----
 add_library(sharding
   src/sharding/hash_ring.cpp
-  src/sharding/shard_map.cpp)
+  src/sharding/shard_map.cpp
+  src/sharding/raft_group_client.cpp
+  src/sharding/metadata_client.cpp
+  src/sharding/client_router.cpp
+  src/sharding/topology_text.cpp)
 target_include_directories(sharding PUBLIC src)
+target_link_libraries(sharding PUBLIC net Threads::Threads)
 
 add_executable(test_hash_ring test/unit/sharding/test_hash_ring.cpp)
 target_link_libraries(test_hash_ring sharding)
 
 add_executable(test_shard_map test/unit/sharding/test_shard_map.cpp)
 target_link_libraries(test_shard_map sharding)
+
+add_executable(test_raft_group_client test/unit/sharding/test_raft_group_client.cpp)
+target_link_libraries(test_raft_group_client sharding)
+add_test(NAME test_raft_group_client COMMAND test_raft_group_client)
+
+add_executable(test_metadata_client test/unit/sharding/test_metadata_client.cpp)
+target_link_libraries(test_metadata_client sharding)
+add_test(NAME test_metadata_client COMMAND test_metadata_client)
+
+add_executable(test_client_router test/unit/sharding/test_client_router.cpp)
+target_link_libraries(test_client_router sharding)
+add_test(NAME test_client_router COMMAND test_client_router)
+
+add_executable(test_topology_text test/unit/sharding/test_topology_text.cpp)
+target_link_libraries(test_topology_text sharding)
+add_test(NAME test_topology_text COMMAND test_topology_text)
+
+add_executable(metadata_group_test test/integration/metadata_group_test.cpp)
+target_link_libraries(metadata_group_test PRIVATE raft sharding)
+add_test(NAME metadata_group_test COMMAND metadata_group_test)
+
+# ---- Phase 3 Step 4: shard node ----
+add_library(shard_node src/sharding/shard_node.cpp)
+target_include_directories(shard_node PUBLIC src)
+target_link_libraries(shard_node PUBLIC raft sharding)
+
+add_executable(kv_shard_server src/shard_server_main.cpp)
+target_link_libraries(kv_shard_server PRIVATE shard_node)
+
+add_executable(shard_node_test test/integration/shard_node_test.cpp)
+target_link_libraries(shard_node_test PRIVATE shard_node)
+add_test(NAME shard_node_test COMMAND shard_node_test)
+
+# ---- Phase 3 Step 6: process tooling ----
+add_executable(kv_metadata_server src/metadata_server_main.cpp)
+target_link_libraries(kv_metadata_server PRIVATE raft sharding)
+
+add_executable(kv_admin tools/kv_admin.cpp)
+target_link_libraries(kv_admin PRIVATE sharding)

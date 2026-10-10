@@ -146,33 +146,63 @@ std::string ClientServer::FormatProposeOutcome(const RaftNode::ProposeWaitResult
     if (!result.durable.persisted) {
         return "ERROR local persistence failure\n";
     }
-    if (!result.durable.result.accepted) {
-        // RaftNode's own hint.address, if present, is the leader's RAFT
-        // peer address — not client-reachable. Only hint.leader_id is
-        // reusable here; its client-facing address comes from this
-        // server's own map instead.
-        const auto hint = node_->KnownLeaderHint();
-        if (hint.leader_id.has_value()) {
-            const auto it = client_peer_addresses_.find(*hint.leader_id);
-            if (it != client_peer_addresses_.end()) {
-                return "NOT_LEADER " + it->second.host + ":" +
-                       std::to_string(it->second.port) + "\n";
-            }
-        }
-        return "NOT_LEADER\n";
+        if (!result.durable.result.accepted) {
+        return NotLeaderResponse();
     }
     return "TIMEOUT\n";
+}
+
+std::string ClientServer::NotLeaderResponse() {
+    // Return a "NOT_LEADER" response based on the client_peer_addresses_ map.
+    // If a leader is known and has a client-facing address, include that.
+    // Otherwise, return just "NOT_LEADER".
+    const auto hint = node_->KnownLeaderHint();
+    if (hint.leader_id.has_value()) {
+        const auto it = client_peer_addresses_.find(*hint.leader_id);
+        if (it != client_peer_addresses_.end()) {
+            return "NOT_LEADER " + it->second.host + ":" +
+                   std::to_string(it->second.port) + "\n";
+        }
+    }
+    return "NOT_LEADER\n";
+}
+void ClientServer::SetKeyGuard(KeyGuard guard) {
+    std::shared_ptr<const KeyGuard> shared;
+    if (guard) shared = std::make_shared<const KeyGuard>(std::move(guard));
+    std::lock_guard<std::mutex> lock(guard_mutex_);
+    key_guard_ = std::move(shared);
+}
+
+std::string ClientServer::RejectIfNotOwned(const std::string& key) {
+    // Copy the pointer under the lock, call the guard outside it: the guard
+    // may be slow-ish (a ring lookup) and must not serialize all requests.
+    std::shared_ptr<const KeyGuard> guard;
+    {
+        std::lock_guard<std::mutex> lock(guard_mutex_);
+        guard = key_guard_;
+    }
+    if (!guard) return "";
+    return (*guard)(key);
 }
 
 std::string ClientServer::HandleLine(const std::string& line) {
     std::istringstream iss(line);
     std::string verb;
     iss >> verb;
-
+    // Leadership probe for clients that need to read from the leader
+    // (RaftGroupClient::Get). Same redirect answer as a rejected write.
+    if (verb == "LEADER") {
+        if (node_->CurrentRole() == Role::kLeader) return "LEADER\n";
+        return NotLeaderResponse();
+    }
+    
     if (verb == "GET") {
         std::string key;
         iss >> key;
         if (key.empty()) return "ERROR missing key\n";
+        if (const std::string rejection = RejectIfNotOwned(key); !rejection.empty()) {
+            return rejection;
+        }
 
         std::string value;
         if (node_->Get(key, &value)) {
@@ -187,6 +217,9 @@ std::string ClientServer::HandleLine(const std::string& line) {
         std::string key;
         if (!(iss >> client_id >> sequence_num >> key)) {
             return "ERROR malformed PUT\n";
+        }
+        if (const std::string rejection = RejectIfNotOwned(key); !rejection.empty()) {
+            return rejection;
         }
         std::string value;
         std::getline(iss, value);
@@ -203,6 +236,9 @@ std::string ClientServer::HandleLine(const std::string& line) {
         std::string key;
         if (!(iss >> client_id >> sequence_num >> key)) {
             return "ERROR malformed DELETE\n";
+        }
+        if (const std::string rejection = RejectIfNotOwned(key); !rejection.empty()) {
+            return rejection;
         }
 
         const auto result =

@@ -6,6 +6,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <functional>
+#include <map>
+#include <memory>
 
 #include "net/thread_pool.h"
 #include "raft/raft_node.h"
@@ -35,11 +39,25 @@ public:
     bool Start();
     void Stop();
 
+        // Optional per-key admission check, consulted by GET / PUT / DELETE
+    // BEFORE anything is proposed or read. Returns "" to admit the key, or
+    // a complete response line (including its trailing "\n") to send back
+    // instead. With no guard installed (the default) every key is admitted,
+    // so Phase 1/2 groups and the metadata group behave exactly as before.
+    // Safe to call at any time, including while serving.
+    using KeyGuard = std::function<std::string(const std::string& key)>;
+    void SetKeyGuard(KeyGuard guard);
+
 private:
     void AcceptLoop();
     void HandleClient(int fd);
     std::string HandleLine(const std::string& line);
     std::string FormatProposeOutcome(const RaftNode::ProposeWaitResult& result);
+    std::string RejectIfNotOwned(const std::string& key);
+    // Shared by write rejections and the LEADER probe: "NOT_LEADER host:port"
+    // when the leader is known and has a client-facing address, else a bare
+    // "NOT_LEADER". Uses client_peer_addresses_, NOT RaftNode's Raft-to-Raft map.
+    std::string NotLeaderResponse();
 
     int port_;
     RaftNode* node_;
@@ -52,6 +70,9 @@ private:
 
     std::mutex inbound_mutex_;
     std::vector<int> inbound_fds_;
+
+    std::mutex guard_mutex_;
+    std::shared_ptr<const KeyGuard> key_guard_;  // null = admit everything
 
     // Declared last so it is destroyed first — see design notes §3.2
     // (reusing the exact lesson from Step 8a's RaftTransport).

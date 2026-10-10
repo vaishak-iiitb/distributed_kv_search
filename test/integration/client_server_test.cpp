@@ -171,6 +171,14 @@ void test_put_get_and_redirect_over_real_sockets() {
     const std::string expected_port =
         std::to_string(client_base_port + static_cast<int>(*leader_id));
     CHECK(redirect_resp->find(expected_port) != std::string::npos);
+        // LEADER probe: the leader confirms itself; a follower redirects to it.
+    const auto leader_probe =
+        SendLine(client_base_port + static_cast<int>(*leader_id), "LEADER");
+    CHECK(leader_probe.has_value() && *leader_probe == "LEADER");
+    const auto follower_probe =
+        SendLine(client_base_port + static_cast<int>(follower_id), "LEADER");
+    CHECK(follower_probe.has_value() &&
+          *follower_probe == "NOT_LEADER 127.0.0.1:" + expected_port);
 
     // A write to the REAL leader must succeed.
     const auto put_resp =
