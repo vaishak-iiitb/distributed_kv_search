@@ -196,3 +196,12 @@ target_link_libraries(kv_metadata_server PRIVATE raft sharding)
 
 add_executable(kv_admin tools/kv_admin.cpp)
 target_link_libraries(kv_admin PRIVATE sharding)
+
+# ---- Phase 3 Step 7: 12-process integration test (real binaries) ----
+add_executable(multi_shard_test test/integration/multi_shard_test.cpp)
+target_link_libraries(multi_shard_test PRIVATE sharding)
+add_dependencies(multi_shard_test kv_metadata_server kv_shard_server)
+add_test(NAME multi_shard_test COMMAND multi_shard_test)
+
+add_executable(process_harness_test test/integration/process_harness_test.cpp)
+add_test(NAME process_harness_test COMMAND process_harness_test)
