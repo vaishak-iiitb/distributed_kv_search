@@ -204,6 +204,22 @@ std::string ClientServer::HandleLine(const std::string& line) {
             return rejection;
         }
 
+        // Flag #2 fix: the leader serves reads only after its election no-op
+        // has committed and applied (so a new leader cannot answer from state
+        // that is behind entries it already acknowledged). A node that is not
+        // the leader keeps the previous behaviour (local read); RaftGroupClient
+        // only ever asks the node that answered LEADER.
+        const RaftNode::ReadResult read = node_->GetFromLeader(key, propose_timeout_);
+        switch (read.status) {
+            case RaftNode::ReadStatus::kFound:
+                return "VALUE " + read.value + "\n";
+            case RaftNode::ReadStatus::kNotFound:
+                return "NOT_FOUND\n";
+            case RaftNode::ReadStatus::kNotReady:
+                return "TIMEOUT\n";  // leader, but its barrier did not clear in time
+            case RaftNode::ReadStatus::kNotLeader:
+                break;  // fall through to the local read below
+        }
         std::string value;
         if (node_->Get(key, &value)) {
             return "VALUE " + value + "\n";

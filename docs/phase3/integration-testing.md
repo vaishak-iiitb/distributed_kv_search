@@ -189,3 +189,4 @@ and append, exec failure (exit 127), destructor cleanup, port check.
 
 ​
    | 2026-10-14 | 11 | 0 | write-then-kill rounds FAILED every run: acknowledged write unreadable after immediate leader kill (flag #2 confirmed) |
+   | 2026-10-18 | 10 | 10 | after flag #2 fix (leader no-op + read barrier) |

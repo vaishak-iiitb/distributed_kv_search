@@ -275,6 +275,16 @@ RaftGroupClient::Result RaftGroupClient::Get(const std::string& key) {
                 response->size() > 6 ? response->substr(6) : std::string();
             return {Status::kOk, value, ""};
         }
+        // The node answered LEADER a moment ago but cannot serve the read yet
+        // (its election no-op has not committed: TIMEOUT) or has just lost
+        // leadership (NOT_LEADER). Neither is final: probe again.
+        if (*response == "TIMEOUT" || HasPrefix(*response, "NOT_LEADER")) {
+            last_detail = "leader " + target.ToString() + " not ready to serve reads: " + *response;
+            leader_.reset();
+            consecutive_redirects = 0;
+            SleepUpTo(options_.retry_backoff_ms, deadline);
+            continue;
+        }
         std::uint64_t wrong_shard_version = 0;
         if (ParseWrongShard(*response, &wrong_shard_version)) {
             return {Status::kWrongShard, "", *response, wrong_shard_version};

@@ -132,6 +132,7 @@ void RaftNode::OnMessage(NodeId from, const Message& message) {
         message);
 
     HandleResult result;
+    HandleResult noop_to_send;
     bool ok = false;
     {
         std::lock_guard<std::mutex> lock(node_mutex_);
@@ -141,11 +142,33 @@ void RaftNode::OnMessage(NodeId from, const Message& message) {
         }
         ResetElectionTimerIfWarranted(durable.result);
         UpdateKnownLeader(event, durable.result);
+        // Flag #2 fix: a new leader immediately appends an entry of its own
+        // term so that older entries can become committed and applied.
+        if (durable.result.became_leader) noop_to_send = AppendLeaderNoopLocked();
         result = durable.result;
         ok = true;
         state_changed_cv_.notify_all();  // Step 9c — see design notes §3.2
     }
-    if (ok) DispatchAndSend(result);
+    if (ok) {
+        DispatchAndSend(result);
+        DispatchAndSend(noop_to_send);
+    }
+}
+
+HandleResult RaftNode::AppendLeaderNoopLocked() {
+    have_barrier_ = false;
+    const auto noop = node_.ProposeNoop();
+    if (!noop.persisted || !noop.result.accepted) return HandleResult{};
+    have_barrier_ = true;
+    barrier_term_ = node_.state().current_term;
+    barrier_index_ = noop.result.index;
+    return noop.result.to_send;
+}
+
+bool RaftNode::ReadBarrierPassedLocked() const {
+    const RaftState& state = node_.state();
+    return have_barrier_ && state.role == Role::kLeader && state.current_term == barrier_term_ &&
+           state.commit_index >= barrier_index_ && state.last_applied >= barrier_index_;
 }
 
 void RaftNode::DrivingLoop() {
@@ -316,6 +339,30 @@ RaftNode::ProposeWaitResult RaftNode::ProposeDeleteAndWait(ClientId client_id,
 bool RaftNode::Get(const std::string& key, std::string* out_value) {
     std::lock_guard<std::mutex> lock(node_mutex_);
     return node_.Get(key, out_value);
+}
+
+RaftNode::ReadResult RaftNode::GetFromLeader(const std::string& key, Duration timeout) {
+    ReadResult out;
+    std::unique_lock<std::mutex> lock(node_mutex_);
+    state_changed_cv_.wait_for(lock, timeout, [&] {
+        return !running_.load() || node_.state().role != Role::kLeader || ReadBarrierPassedLocked();
+    });
+    if (!running_.load() || node_.state().role != Role::kLeader) {
+        out.status = ReadStatus::kNotLeader;
+        return out;
+    }
+    if (!ReadBarrierPassedLocked()) {
+        out.status = ReadStatus::kNotReady;
+        return out;
+    }
+    std::string value;
+    if (node_.Get(key, &value)) {
+        out.status = ReadStatus::kFound;
+        out.value = std::move(value);
+    } else {
+        out.status = ReadStatus::kNotFound;
+    }
+    return out;
 }
 
 Role RaftNode::CurrentRole() {

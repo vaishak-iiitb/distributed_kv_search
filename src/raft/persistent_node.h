@@ -39,6 +39,10 @@ public:
     DurableProposeResult ProposeDelete(ClientId client_id, SequenceNum sequence_num,
                                        const std::string& key);
 
+    // Flag #2 fix: appends the new-term no-op entry (see command.h). Only
+    // meaningful on a node that has just become leader.
+    DurableProposeResult ProposeNoop();
+
     bool Get(const std::string& key, std::string* out_value);
 
 private:

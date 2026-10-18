@@ -27,6 +27,16 @@ struct Command {
     std::string value;  // unused for kDelete
 };
 
+// Flag #2 fix: the entry a new leader appends at the start of its term. It is
+// NOT a client command. Raft only lets a leader treat older entries as
+// committed once an entry of ITS OWN term has been replicated to a majority;
+// without this entry a freshly elected leader's commit index (and therefore
+// its applied state) stays behind until some client happens to write.
+// It is deliberately NOT a valid encoded Command, so decode_command() rejects
+// it, and the apply path skips it explicitly (see PersistentRaftNode).
+inline constexpr const char* kNoopCommand = "NOOP";
+inline bool is_noop_command(const std::string& bytes) { return bytes == kNoopCommand; }
+
 std::string encode_command(const Command& cmd);
 std::optional<Command> decode_command(const std::string& bytes);
 

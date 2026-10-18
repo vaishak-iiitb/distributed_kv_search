@@ -70,6 +70,22 @@ public:
 
     bool Get(const std::string& key, std::string* out_value);
 
+    // Flag #2 fix. A read the LEADER may serve: it waits (up to `timeout`)
+    // until this leader has committed and applied the no-op it appended when
+    // it was elected, which guarantees every entry committed in earlier terms
+    // is already in the state machine. kNotLeader means this node is not (or
+    // is no longer) the leader; kNotReady means the barrier did not clear in
+    // time (e.g. no majority reachable).
+    // NOTE: this closes the "new leader serves a stale read" window. It does
+    // NOT stop a deposed leader that has not yet noticed it was replaced from
+    // answering (that needs a ReadIndex-style leadership check; see docs).
+    enum class ReadStatus { kFound, kNotFound, kNotLeader, kNotReady };
+    struct ReadResult {
+        ReadStatus status = ReadStatus::kNotLeader;
+        std::string value;
+    };
+    ReadResult GetFromLeader(const std::string& key, Duration timeout);
+
     Role CurrentRole();
 
     struct LeaderHint {
@@ -86,6 +102,12 @@ private:
     void UpdateKnownLeader(const Event& event, const HandleResult& result);
     AppendEntriesRequest BuildHeartbeatFor(NodeId peer);
 
+    // Flag #2 fix. Caller must hold node_mutex_.
+    // Appends the new-term no-op and records it as the read barrier; returns
+    // the messages to broadcast (empty if the append failed).
+    HandleResult AppendLeaderNoopLocked();
+    bool ReadBarrierPassedLocked() const;
+
     // Step 9c: shared by both *_AndWait methods — see design notes §3.1.
     // Caller must NOT hold node_mutex_ when calling this.
     ProposeWaitResult WaitForCommit(Term proposed_term, LogIndex proposed_index,
@@ -99,6 +121,12 @@ private:
     PersistentRaftNode node_;
     ElectionTimer election_timer_;
     std::optional<NodeId> known_leader_;
+
+    // Flag #2 fix (guarded by node_mutex_): the no-op this node appended when
+    // it last became leader. Reads are allowed once it is committed+applied.
+    bool have_barrier_ = false;
+    Term barrier_term_ = 0;
+    LogIndex barrier_index_ = 0;
 
     // Step 9c: notified after every Handle() call that actually ran
     // (persisted == true) — see design notes §3.2 for why unconditional

@@ -44,6 +44,7 @@ bool PersistentRaftNode::PersistNewLogEntries(LogIndex old_log_size) {
 
 void PersistentRaftNode::ApplyCommitted(const std::vector<LogEntry>& to_apply) {
     for (const LogEntry& entry : to_apply) {
+        if (is_noop_command(entry.command)) continue;  // leader's new-term no-op: nothing to apply
         const auto cmd = decode_command(entry.command);
         if (!cmd) continue;  // malformed — see Step 7b design notes §3.3
 
@@ -134,6 +135,10 @@ PersistentRaftNode::DurableProposeResult PersistentRaftNode::ProposeDelete(
     cmd.sequence_num = sequence_num;
     cmd.key = key;
     return Propose(encode_command(cmd));
+}
+
+PersistentRaftNode::DurableProposeResult PersistentRaftNode::ProposeNoop() {
+    return Propose(std::string(kNoopCommand));
 }
 
 bool PersistentRaftNode::Get(const std::string& key, std::string* out_value) {

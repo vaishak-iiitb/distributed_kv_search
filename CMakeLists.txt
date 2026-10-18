@@ -205,3 +205,18 @@ add_test(NAME multi_shard_test COMMAND multi_shard_test)
 
 add_executable(process_harness_test test/integration/process_harness_test.cpp)
 add_test(NAME process_harness_test COMMAND process_harness_test)
+
+# ---- Flag #2 fix (leader no-op + read barrier) ----
+add_executable(noop_command_test test/unit/raft/noop_command_test.cpp)
+target_link_libraries(noop_command_test PRIVATE raft)
+add_test(NAME noop_command_test COMMAND noop_command_test)
+
+add_executable(read_after_failover_test test/integration/read_after_failover_test.cpp)
+target_link_libraries(read_after_failover_test PRIVATE raft sharding)
+add_test(NAME read_after_failover_test COMMAND read_after_failover_test)
+
+# KNOWN-FAILING proof of the match_index inflation bug (see
+# docs/phase3/read-consistency.md). Built but NOT registered with ctest; add
+# add_test(NAME stale_ack_commit_test COMMAND stale_ack_commit_test) once fixed.
+add_executable(stale_ack_commit_test test/unit/raft/stale_ack_commit_test.cpp)
+target_link_libraries(stale_ack_commit_test PRIVATE raft)
