@@ -221,6 +221,9 @@ HandleResult on_append_entries(RaftState& state,
     }
 
     resp.success = true;
+    // Bug D fix: report exactly the prefix this request verified, not the
+    // follower's own last index and not "one past" for an empty heartbeat.
+    resp.match_index = req.prev_log_index + req.entries.size();
     result.messages.push_back(Outgoing{req.leader_id, resp});
     return result;
 }
@@ -244,8 +247,15 @@ HandleResult on_append_entries_response(RaftState& state, NodeId from,
     LogIndex& match = state.match_index[from];
 
     if (resp.success) {
-        match = next;
-        next += 1;
+        // Bug D fix. Trust what the follower says it matched, never what we
+        // guess the request carried. Clamp to our own log (a follower cannot
+        // honestly match past it) and never move match backwards: acks can
+        // arrive late, duplicated or reordered, and a stale one must not
+        // undo progress.
+        const LogIndex acked = std::min(resp.match_index, state.log.last_index());
+        if (acked > match) match = acked;
+        // next only moves forward on success; a failure is what moves it back.
+        if (next < match + 1) next = match + 1;
     } else if (next > 1) {
         next -= 1;
     }

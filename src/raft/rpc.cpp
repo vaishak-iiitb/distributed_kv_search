@@ -172,6 +172,7 @@ std::uint8_t encode_body(const Message& msg, Writer& w) {
             [&w](const AppendEntriesResponse& m) -> std::uint8_t {
                 w.u64(m.term);
                 w.boolean(m.success);
+                w.u64(m.match_index);
                 return kTypeAppendEntriesResponse;
             },
         },
@@ -211,7 +212,9 @@ std::optional<Message> decode_body(std::uint8_t type, Reader& r) {
         }
         case kTypeAppendEntriesResponse: {
             AppendEntriesResponse m;
-            if (!r.u64(m.term) || !r.boolean(m.success)) return std::nullopt;
+            if (!r.u64(m.term) || !r.boolean(m.success) || !r.u64(m.match_index)) {
+                return std::nullopt;
+            }
             out = m;
             break;
         }

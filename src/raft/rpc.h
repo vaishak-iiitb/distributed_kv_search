@@ -71,9 +71,19 @@ struct AppendEntriesRequest {
 struct AppendEntriesResponse {
     Term term = 0;
     bool success = false;
+    // Bug D fix. Meaningful only when success == true: the highest log index
+    // this follower has VERIFIED to be identical to the leader's log, i.e.
+    // prev_log_index + entries.size() of the request being answered. It is
+    // NOT the follower's own last index (the follower may hold extra,
+    // unverified entries beyond that point). An empty heartbeat therefore
+    // reports prev_log_index, never prev_log_index + 1. The leader uses this
+    // value instead of guessing what the request carried.
+    // Always 0 on a failure reply.
+    LogIndex match_index = 0;
 
     bool operator==(const AppendEntriesResponse& o) const {
-        return term == o.term && success == o.success;
+        return term == o.term && success == o.success &&
+               match_index == o.match_index;
     }
 };
 

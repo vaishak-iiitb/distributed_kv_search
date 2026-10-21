@@ -66,8 +66,49 @@ void test_roundtrip_append_entries() {
 }
 
 void test_roundtrip_append_response() {
-    expect_roundtrip(raft::AppendEntriesResponse{9, true});
-    expect_roundtrip(raft::AppendEntriesResponse{9, false});
+    expect_roundtrip(raft::AppendEntriesResponse{9, true, 0});
+    expect_roundtrip(raft::AppendEntriesResponse{9, true, 5});
+    expect_roundtrip(raft::AppendEntriesResponse{9, false, 0});
+}
+
+// match_index must survive the wire and must take part in operator==. If
+// either encode, decode or operator== forgot the field, one of these fails.
+void test_append_response_match_index_is_carried_and_compared() {
+    const raft::AppendEntriesResponse a{9, true, 5};
+    const raft::AppendEntriesResponse b{9, true, 6};
+    CHECK(!(a == b));  // operator== sees the field
+
+    const raft::DecodeResult r = raft::decode_frame(raft::encode_frame(a));
+    CHECK(r.status == raft::DecodeStatus::kOk);
+    CHECK(r.message.has_value());
+    if (r.message) {
+        const auto* resp = std::get_if<raft::AppendEntriesResponse>(&*r.message);
+        CHECK(resp != nullptr);
+        if (resp) CHECK(resp->match_index == 5);
+    }
+}
+
+// Frame: length(4) type(1) term(8) success(1) match_index(8) = 22 bytes.
+void test_append_response_frame_layout() {
+    const std::string frame = raft::encode_frame(raft::AppendEntriesResponse{9, true, 0x0102});
+    CHECK(frame.size() == 22);
+    CHECK(static_cast<std::uint8_t>(frame[0]) == 18);  // type + 8 + 1 + 8
+    CHECK(static_cast<std::uint8_t>(frame[4]) == 4);   // type byte
+    CHECK(static_cast<std::uint8_t>(frame[14]) == 0x02);  // match_index, little-endian
+    CHECK(static_cast<std::uint8_t>(frame[15]) == 0x01);
+}
+
+// A response frame in the OLD layout (no match_index) must be rejected as
+// corrupt, never silently misread. Mixed old/new binaries are not supported;
+// this only proves the failure is loud.
+void test_old_layout_append_response_is_corrupt() {
+    std::string frame;
+    const std::uint32_t length = 1 + 8 + 1;  // type + term + success
+    for (int i = 0; i < 4; ++i) frame.push_back(static_cast<char>((length >> (8 * i)) & 0xFFu));
+    frame.push_back(static_cast<char>(4));  // AppendEntriesResponse
+    for (int i = 0; i < 8; ++i) frame.push_back(static_cast<char>(i == 0 ? 9 : 0));  // term 9
+    frame.push_back(static_cast<char>(1));  // success
+    CHECK(raft::decode_frame(frame).status == raft::DecodeStatus::kCorrupt);
 }
 
 // Binary command bytes: embedded NUL, high bytes, and empty string. A codec
@@ -90,6 +131,7 @@ void test_roundtrip_extreme_values() {
     expect_roundtrip(raft::RequestVoteRequest{max64, max32, max64, max64});
     expect_roundtrip(raft::AppendEntriesRequest{max64, max32, max64, max64,
                                                 {{max64, "x"}}, max64});
+    expect_roundtrip(raft::AppendEntriesResponse{max64, true, max64});
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +143,18 @@ void test_roundtrip_extreme_values() {
 // deliver frames in arbitrary chunks.
 void test_every_prefix_needs_more() {
     const std::string frame = raft::encode_frame(sample_append_with_entries());
+    for (std::size_t n = 0; n < frame.size(); ++n) {
+        const raft::DecodeResult r =
+            raft::decode_frame(std::string_view(frame).substr(0, n));
+        CHECK(r.status == raft::DecodeStatus::kNeedMore);
+        CHECK(r.consumed == 0);
+        CHECK(!r.message.has_value());
+    }
+}
+
+// Same property for the response frame, which now has a trailing match_index.
+void test_every_prefix_of_append_response_needs_more() {
+    const std::string frame = raft::encode_frame(raft::AppendEntriesResponse{9, true, 5});
     for (std::size_t n = 0; n < frame.size(); ++n) {
         const raft::DecodeResult r =
             raft::decode_frame(std::string_view(frame).substr(0, n));
@@ -249,10 +303,13 @@ int main() {
     test_roundtrip_request_vote_response();
     test_roundtrip_append_entries();
     test_roundtrip_append_response();
+    test_append_response_match_index_is_carried_and_compared();
+    test_append_response_frame_layout();
     test_roundtrip_binary_and_empty_commands();
     test_roundtrip_extreme_values();
 
     test_every_prefix_needs_more();
+    test_every_prefix_of_append_response_needs_more();
     test_concatenated_frames();
 
     test_unknown_type_is_corrupt();
@@ -263,6 +320,7 @@ int main() {
     test_entry_count_bomb_is_corrupt();
     test_string_length_bomb_is_corrupt();
     test_short_length_does_not_read_past_frame();
+    test_old_layout_append_response_is_corrupt();
 
     test_random_bytes_do_not_crash();
     test_mutated_valid_frames_do_not_crash();

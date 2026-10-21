@@ -215,8 +215,12 @@ add_executable(read_after_failover_test test/integration/read_after_failover_tes
 target_link_libraries(read_after_failover_test PRIVATE raft sharding)
 add_test(NAME read_after_failover_test COMMAND read_after_failover_test)
 
-# KNOWN-FAILING proof of the match_index inflation bug (see
-# docs/phase3/read-consistency.md). Built but NOT registered with ctest; add
-# add_test(NAME stale_ack_commit_test COMMAND stale_ack_commit_test) once fixed.
+# ---- Bug D fix (match_index carried in AppendEntriesResponse) ----
+# See docs/phase3/read-consistency.md, section D.
 add_executable(stale_ack_commit_test test/unit/raft/stale_ack_commit_test.cpp)
 target_link_libraries(stale_ack_commit_test PRIVATE raft)
+add_test(NAME stale_ack_commit_test COMMAND stale_ack_commit_test)
+
+add_executable(ack_match_index_test test/unit/raft/ack_match_index_test.cpp)
+target_link_libraries(ack_match_index_test PRIVATE raft)
+add_test(NAME ack_match_index_test COMMAND ack_match_index_test)

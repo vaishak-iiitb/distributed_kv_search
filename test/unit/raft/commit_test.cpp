@@ -49,6 +49,7 @@ void test_old_term_entry_not_committed_by_majority_count_alone() {
     raft::AppendEntriesResponse resp;
     resp.term = 4;
     resp.success = true;
+    resp.match_index = 2;  // the follower says it matched through index 2
     const raft::HandleResult r =
         raft::handle(leader, 1, raft::Received<raft::AppendEntriesResponse>{resp}, 3);
 
@@ -80,6 +81,7 @@ void test_new_term_entry_commits_and_carries_old_entry_with_it() {
     raft::AppendEntriesResponse resp;
     resp.term = 4;
     resp.success = true;
+    resp.match_index = 3;  // the follower says it matched through index 3
     const raft::HandleResult r =
         raft::handle(leader, 1, raft::Received<raft::AppendEntriesResponse>{resp}, 3);
 
@@ -115,6 +117,7 @@ void test_untracked_peers_count_as_zero_not_ignored() {
     raft::AppendEntriesResponse resp;
     resp.term = 1;
     resp.success = true;
+    resp.match_index = 2;  // the follower says it matched through index 2
     const raft::HandleResult r =
         raft::handle(leader, 1, raft::Received<raft::AppendEntriesResponse>{resp}, 5);
 
